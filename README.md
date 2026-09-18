@@ -1,78 +1,78 @@
 # OmniCodex
 
-**Cost-aware model routing and multi-agent orchestration for OpenAI Codex.**
+**Adaptive model routing and multi-agent orchestration for OpenAI Codex.**
 
-> Use the right model for the right task.
+> Use the right intelligence, at the right time.
 
-OmniCodex is an experimental orchestration layer for Codex that routes work by **complexity, risk, and cost** instead of using the strongest model for every step.
+OmniCodex is an experimental orchestration layer for Codex that routes work by **complexity, risk, quality target, and cost**. Instead of forcing one strategy on every user, OmniCodex provides selectable operating profiles.
 
-## Core idea
+## Profiles
+
+| Profile | Control plane | Workers | Astra policy | Goal |
+|---|---|---|---|---|
+| `economy` | Terra, with Sol when needed | Luna + Terra | Emergency only | Maximize quota life |
+| `balanced` | **Sol / Medium** | Luna + Terra | Exceptional escalation | Strong quality/usage balance |
+| `quality` | **Sol / High** | Terra + Sol | Hard bugs / critical decisions | Favor quality |
+| `max` | **Astra** | Terra + Sol + Astra | Liberal | Maximum capability |
+| `auto` | Adaptive | Adaptive | Adaptive | Select profile from task risk/complexity |
+
+**Proposed default: `balanced`.**
+
+Even in `max`, the orchestrator should delegate deterministic work when doing so does not reduce quality. Astra does not need to run routine lint or mechanical searches merely because Astra is the control plane.
+
+## Core model roles
 
 ```
 Luna  -> high-volume bounded work
 Terra -> exploration and implementation
-Sol   -> planning, review, hard reasoning
-Astra -> exceptional escalation only
+Sol   -> orchestration, planning, review, hard reasoning
+Astra -> maximum-capability orchestration or exceptional escalation
 ```
 
-The router also **de-escalates** after difficult work is complete. A task that needs Sol for architecture does not need Sol to run routine tests.
+Routing is **phase-specific**. OmniCodex can escalate for a difficult decision and then de-escalate for implementation or verification.
+
+## Control plane vs execution plane
+
+The orchestrator should spend expensive intelligence on decomposition, delegation, acceptance, risk and escalation decisions. Workers perform the bulk of bounded execution.
+
+A typical `balanced` task:
+
+```
+User request
+    |
+Sol / Medium orchestrator
+    |
+    +--> Luna / Low: bounded search and verification
+    +--> Terra / Medium: exploration and implementation
+    +--> Sol / High: difficult specialist work when justified
+    +--> Astra: exceptional escalation
+    |
+Sol / Medium: acceptance
+```
 
 ## Principles
 
-- Cheapest capable model, not cheapest model at any cost.
+- Preserve required quality; optimize waste, not correctness.
+- Strong orchestration can coexist with cheaper execution.
 - Decompose large tasks before routing.
 - Escalate only for a concrete technical reason.
 - De-escalate as soon as the expensive phase is complete.
 - Keep expensive-model context narrow and relevant.
 - Prefer bounded delegation over redundant parallel agents.
-- Quality gates remain mandatory: tests, review, security and correctness are never skipped to save usage.
-
-## Default roles
-
-| Role | Default tier | Purpose |
-|---|---|---|
-| Researcher | Luna / Low | Search, references, logs, bounded extraction |
-| Explorer | Terra / Low-Medium | Codebase exploration and mapping |
-| Implementer | Terra / Medium | Normal implementation and refactoring |
-| Planner | Sol / Medium | Architecture and cross-module planning |
-| Reviewer | Sol / Medium | High-value review and risk analysis |
-| Debugger | Sol / High | Difficult debugging |
-| Escalation | Astra / minimum necessary | Exceptional unresolved work |
-
-Model names and reasoning levels depend on what your Codex environment exposes. OmniCodex must not pretend a route exists when the runtime does not support it.
-
-## Routing lifecycle
-
-```
-request
-  |
-decompose
-  |
-route cheapest capable worker
-  |
-execute + verify
-  |
-blocked? ---- yes ---> diagnose ---> escalate if justified
-  |                                  |
-  no                                 v
-  |                              expensive phase
-  v                                  |
-de-escalate <-------------------------+
-  |
-finish
-```
-
-See [routing policy](docs/routing.md) and [architecture](docs/architecture.md).
+- Tests, review, security and correctness are never skipped to save usage.
+- Never pretend the runtime switched models when it did not.
 
 ## Status
 
-**v0.1.0 — initial architecture.**
+**v0.1.0 — architecture and policy design.**
 
-The first milestone is to validate Codex's currently supported custom-agent/plugin configuration and turn these policies into an installable package without relying on undocumented behavior.
+Next: validate the current Codex plugin/custom-agent schema and implement the profiles using supported runtime mechanisms.
+
+See [routing policy](docs/routing.md), [profiles](docs/profiles.md), [architecture](docs/architecture.md), and [roadmap](docs/roadmap.md).
 
 ## Inspiration
 
-OmniCodex was inspired by community work around selective Codex orchestration, including Sol Advisor. OmniCodex focuses specifically on aggressive **cost-aware routing plus automatic de-escalation**.
+OmniCodex was inspired by community work around selective Codex orchestration, including Sol Advisor. Its focus is configurable quality/cost profiles, adaptive routing, context budgeting, escalation, and automatic de-escalation.
 
 ## License
 
