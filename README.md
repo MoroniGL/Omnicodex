@@ -64,9 +64,11 @@ Sol / Medium: acceptance
 
 ## Status
 
-**v0.1.0 — architecture and policy design.**
+**Experimental — Balanced routing smoke-tested locally on Codex 0.153.4.**
 
-Next: validate the current Codex plugin/custom-agent schema and implement the profiles using supported runtime mechanisms.
+A persisted read-only test verified native role loading: Sol/Medium orchestrated Luna/Low and Terra/Medium, with the models and efforts confirmed in runtime turn records. The other five roles have only static validation. This does not establish quality or quota savings.
+
+See [local installation, runtime evidence, limitations, and rollback](docs/local-validation.md).
 
 See [routing policy](docs/routing.md), [profiles](docs/profiles.md), [architecture](docs/architecture.md), and [roadmap](docs/roadmap.md).
 

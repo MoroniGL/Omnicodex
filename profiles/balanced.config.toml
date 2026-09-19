@@ -1,5 +1,8 @@
 model = "gpt-5.6-sol"
 model_reasoning_effort = "medium"
+developer_instructions = """
+For the primary orchestrator, use the installed omnicodex routing skill with the Balanced policy: Sol Medium orchestrates, Luna/Terra perform bounded work, and Astra is reserved for a concrete exceptional escalation. Delegated workers must focus on their assigned task and return evidence to their parent.
+"""
 
 [agents]
 enabled = true
