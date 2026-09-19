@@ -18,6 +18,33 @@ OmniCodex is an experimental orchestration layer for Codex that routes work by *
 
 **Proposed default: `balanced`.**
 
+## Install
+
+Requires Codex 0.153.4 or a compatible release and Python 3.11 or newer:
+
+```sh
+python3 scripts/install.py
+```
+
+The installer creates a timestamped backup, preserves the base `config.toml`, refuses differing destinations by default, and installs all four namespaced profiles, seven custom roles, and the routing skill. After reviewing a known OmniCodex update, use `--replace-existing`; every replaced file is backed up first.
+
+Start a new CLI session with one of the static profiles:
+
+```sh
+codex --strict-config -p omnicodex-economy
+codex --strict-config -p omnicodex-balanced
+codex --strict-config -p omnicodex-quality
+codex --strict-config -p omnicodex-max
+```
+
+Profiles apply to the new CLI process. They do not change an existing Desktop/IDE conversation or the global model selection. A trusted project `.codex/config.toml` has higher precedence and can override a profile. Inspect the effective static model layers from the directory where you intend to start Codex:
+
+```sh
+python3 scripts/install.py --inspect-profile omnicodex-balanced --cwd "$PWD"
+```
+
+Auto remains a dynamic routing policy in the `omnicodex` skill. Ask the active agent to use **OmniCodex Auto**; it classifies and delegates each phase but does not pretend to mutate the already-running parent model.
+
 Even in `max`, the orchestrator should delegate deterministic work when doing so does not reduce quality. Astra does not need to run routine lint or mechanical searches merely because Astra is the control plane.
 
 ## Core model roles
@@ -64,9 +91,9 @@ Sol / Medium: acceptance
 
 ## Status
 
-**Experimental — Balanced routing smoke-tested locally on Codex 0.153.4.**
+**Experimental — all static profiles and custom roles smoke-tested locally on Codex 0.153.4.**
 
-A persisted read-only test verified native role loading: Sol/Medium orchestrated Luna/Low and Terra/Medium, with the models and efforts confirmed in runtime turn records. The other five roles have only static validation. This does not establish quality or quota savings.
+Persisted read-only tests verified Economy, Balanced, Quality, and Max control planes plus all seven native custom roles. Models and efforts were confirmed in runtime turn records, including Sol/Medium delegation to Luna, Terra, Sol, and Astra without explicit spawn overrides. Auto dynamically selected Luna for a narrow read-only phase while correctly preserving the parent model. This does not establish quality or quota savings.
 
 See [local installation, runtime evidence, limitations, and rollback](docs/local-validation.md).
 

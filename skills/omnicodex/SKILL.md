@@ -40,6 +40,6 @@ Some V2 APIs do not expose a custom-role selector. In that case, read the select
 - Balanced: Sol Medium control plane with Luna/Terra bulk execution.
 - Quality: Sol High control plane.
 - Max: Astra control plane; deterministic work can still be delegated.
-- Auto: classify risk and complexity, then select a profile.
+- Auto: dynamic skill policy, not a static Codex profile. When the user requests OmniCodex Auto, classify each phase by ambiguity, reversibility, blast radius, security/data integrity risk, and verification cost. Route narrow repeatable work to Luna; normal exploration and implementation to Terra; architecture, review, or difficult debugging to Sol; and only an exceptional unresolved or critical-risk phase to Astra. Reassess after each phase and de-escalate immediately. Auto cannot change the already-running parent thread's model; disclose that constraint and use native roles for the work. If the user needs a different parent control plane, recommend starting a new explicit profile rather than claiming Auto changed it.
 
 Never claim a model switch occurred unless the spawned turn's exposed `turn_context` contains the requested full model ID and reasoning effort. If `turn_context` is unavailable, report the execution as unverified. Never weaken correctness or acceptance criteria to save usage.
