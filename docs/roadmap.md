@@ -13,12 +13,26 @@
 - [ ] Add configuration validation.
 - [ ] Add example project integration.
 
+## Context & Token Efficiency — first increment
+- [x] Document optional providers, native fallback, and evidence safety contracts.
+- [x] Add Context Mode and codebase-memory-mcp skill-guided policy adapters.
+- [x] Add offline diagnostics and advisory plans from supplied capability inventories.
+- [x] Add compact handoff instructions and on-demand skill reference.
+- [x] Add offline tests for opt-in, freshness/session checks, fallback, and input validation.
+- [x] Define a benchmark protocol without claiming measured savings.
+- [ ] Verify live MCP tool access in both parent and child agents on supported clients.
+- [ ] Verify raw-output retrieval, exit codes, permissions, and failure handling live.
+- [ ] Measure acceptance quality, latency, tokens, setup overhead, and allowance impact.
+- [ ] Add opt-in, version-aware installer with backups and collision handling.
+- [ ] Evaluate RTK command-specific integration; avoid stacked compression.
+- [ ] Implement opt-in persistent project memory with invalidation and retention policy.
+
 ## v0.2 — Observability
 - Route decision log.
 - Profile decision log.
 - Usage-oriented task accounting where supported.
 - Escalation/de-escalation metrics.
-- Dry-run routing mode.
+- Runtime-backed routing diagnostics (offline advisory mode is now available).
 
 ## v0.3 — Adaptive routing
 - Auto profile classifier.

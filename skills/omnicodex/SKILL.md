@@ -1,45 +1,77 @@
 ---
 name: omnicodex
-description: Route bounded Codex work through explicit, verified model and reasoning configurations while preserving acceptance criteria.
+description: Coordinate bounded Codex work with explicit model roles, quality-preserving routing, optional context tools, compact evidence handoffs, and runtime capability checks.
 ---
 
-# OmniCodex routing skill
+# OmniCodex routing
 
-Preserve required quality while avoiding expensive-model work that does not require expensive-model capability.
+Preserve required quality. Optimize unnecessary work, not correctness.
 
-## Balanced runtime
-Use Balanced with the Sol control plane at `gpt-5.6-sol` / `medium`.
+## Runtime and role selection
 
-Assign bounded work by the configured role:
+Read the active profile and project instructions. Discover the agents and tools
+actually exposed in this runtime. A template or binary on PATH is not proof that
+a role or MCP server can be called.
 
-- `luna-researcher`: `gpt-5.6-luna` / `low` for research, extraction, and routine verification.
-- `terra-explorer`: `gpt-5.6-terra` / `low` for focused repository exploration and implementation mapping.
-- `terra-implementer`: `gpt-5.6-terra` / `medium` for bounded implementation.
+Use the native custom-role selector when exposed and select the configured role ID.
+Check local per-turn metadata such as `turn_context` when available. Report the
+source of the evidence: requested configuration, a local execution record, or a
+provider response are different things. Local records are not independent proof
+of the model actually served by a provider. Missing metadata means unverified,
+not automatically broken.
 
-Use a native custom-role selector when the active runtime exposes one. Select the configured role ID. When the spawned turn exposes `turn_context`, verify that it reports the required full model ID and reasoning effort; otherwise record that the runtime configuration is unverified.
-
-Some V2 APIs do not expose a custom-role selector. In that case, read the selected role's `developer_instructions` from `.codex/agents/<role-id>.toml` in the project or `$CODEX_HOME/agents/<role-id>.toml` (default `~/.codex/agents`), pass those full instructions with an isolated task context, and explicitly pass the role's full `model` and `model_reasoning_effort`. Report that this is a fallback execution, not a native role selection. When `turn_context` is unavailable, disclose the configuration as unverified; never infer or report a model switch from TOML configuration, a prompt, or a worker self-report.
+When no native role selector exists, use an explicit model/effort delegation
+fallback ONLY if the current tool schema supports it. Read the applicable role
+instructions from project `.codex/agents/` or `$CODEX_HOME/agents/` and pass the
+bounded task and required constraints. Preserve permissions and report fallback
+execution rather than native role selection. Never invent arguments, bypass
+approvals, or use an independent CLI call while claiming it was a child agent.
 
 ## Workflow
-1. Read the active profile and inspect the control turn's `turn_context` when the runtime exposes it; otherwise record that verification is unavailable.
-2. Decompose substantial requests into bounded phases with isolated context.
-3. Keep orchestration and acceptance with the profile control plane.
-4. Delegate each phase to the cheapest capable configured role and validate its `turn_context`.
-5. Diagnose failure before escalating.
-6. De-escalate after the expensive phase.
-7. Verify the original acceptance criteria.
+
+1. Decompose substantial requests into bounded phases. Keep tiny tasks local
+   when delegation would add more overhead than useful work.
+2. Keep planning, acceptance, and dependency tracking with the active orchestrator.
+3. Delegate to the least expensive capable configured worker. Supply relevant
+   paths, constraints, acceptance criteria, and existing evidence, not full history.
+4. For structural discovery or large output, consult
+   [optional efficiency adapters](references/efficiency.md) only when needed.
+   Use approved, available providers or native targeted tools.
+5. Diagnose failures before escalation. Escalate for a concrete capability barrier
+   or material risk, not merely elapsed time. Do not repeat identical failed work.
+6. Return to cheaper execution after the difficult phase; this changes workers,
+   not the model of an already-running parent.
+7. Verify original acceptance criteria using actual results and relevant source.
+   Summaries, graph absence, and model confidence are not proof of correctness.
+8. Return a compact report with status, changes, validation, evidence, risks, and
+   next step. Include failures and unknowns even above a soft length target.
 
 ## Workers
-- Luna: search, extraction, routine verification.
-- Terra: exploration and normal implementation.
-- Sol: planning, review, difficult debugging.
-- Astra: in Economy, Balanced, and Quality, only a concrete exceptional blocker or a user-controlled escalation, at `gpt-6-astra` / `high`. In Max, Astra is the control plane.
+
+- `luna-researcher`: `gpt-5.6-luna` / `low`; bounded search and extraction.
+- `terra-explorer`: `gpt-5.6-terra` / `low`; focused code mapping.
+- `terra-implementer`: `gpt-5.6-terra` / `medium`; bounded implementation.
+- `sol-planner`, `sol-reviewer`: `gpt-5.6-sol` / `medium`; consequential decisions.
+- `sol-debugger`: `gpt-5.6-sol` / `high`; difficult debugging.
+- `astra-expert`: `gpt-6-astra` / `high`; exceptional unresolved work or an explicitly
+  authorized escalation. Do not consume Astra merely to check its availability.
+
+These are configured targets, not a universal availability guarantee. Verify
+actual installation support before using a route.
 
 ## Profiles
-- Economy: Luna/Terra first.
-- Balanced: Sol Medium control plane with Luna/Terra bulk execution.
-- Quality: Sol High control plane.
-- Max: Astra control plane; deterministic work can still be delegated.
-- Auto: dynamic skill policy, not a static Codex profile. When the user requests OmniCodex Auto, classify each phase by ambiguity, reversibility, blast radius, security/data integrity risk, and verification cost. Route narrow repeatable work to Luna; normal exploration and implementation to Terra; architecture, review, or difficult debugging to Sol; and only an exceptional unresolved or critical-risk phase to Astra. Reassess after each phase and de-escalate immediately. Auto cannot change the already-running parent thread's model; disclose that constraint and use native roles for the work. If the user needs a different parent control plane, recommend starting a new explicit profile rather than claiming Auto changed it.
 
-Never claim a model switch occurred unless the spawned turn's exposed `turn_context` contains the requested full model ID and reasoning effort. If `turn_context` is unavailable, report the execution as unverified. Never weaken correctness or acceptance criteria to save usage.
+Economy targets Terra Medium orchestration and favors Luna/Terra execution.
+Balanced targets Sol Medium with Luna/Terra workers. Quality targets Sol High.
+Max targets Astra High orchestration while still delegating bounded work when safe.
+The profile name Max does not imply the reasoning string `max`.
+
+Auto is a dynamic skill policy, not a fifth static profile. Classify each phase by
+ambiguity, reversibility, blast radius, security/data-integrity risk, and verification
+cost. Prefer Luna for narrow repeatable work, Terra for normal engineering, Sol for
+consequential decisions, and Astra only for exceptional unresolved or critical-risk
+work. Reassess at phase boundaries. Auto cannot change the running parent model;
+use supported child roles, or request a new explicit profile when the parent must change.
+
+Never weaken permissions, tests, security, or acceptance criteria to save usage.
+Never claim a model switch solely from TOML, a prompt, or a worker self-report.

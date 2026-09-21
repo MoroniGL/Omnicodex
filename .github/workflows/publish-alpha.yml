@@ -1,0 +1,79 @@
+name: Publish reviewed alpha
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: omnicodex-alpha-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'MoroniGL/Omnicodex' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Verify authorized preview and notes
+        run: |
+          test "$(cat VERSION)" = '0.1.0-alpha.1'
+          test -s docs/releases/v0.1.0-alpha.1.md
+      - name: Run offline tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile scripts
+        run: python -m compileall -q scripts tests
+      - name: Exercise offline diagnostics
+        run: |
+          python scripts/efficiency.py doctor
+          python scripts/efficiency.py plan --profile balanced --task structural
+
+  publish:
+    needs: validate
+    if: github.repository == 'MoroniGL/Omnicodex' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Create the authorized prerelease without replacing existing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat VERSION)" = '0.1.0-alpha.1'
+          tag='v0.1.0-alpha.1'
+          existing="$RUNNER_TEMP/omnicodex-existing-release.json"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json targetCommitish,isPrerelease,tagName > "$existing"; then
+            python3 - "$existing" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1], encoding='utf-8') as source:
+              release = json.load(source)
+          if (release.get('targetCommitish') != os.environ['GITHUB_SHA']
+                  or release.get('isPrerelease') is not True
+                  or release.get('tagName') != 'v0.1.0-alpha.1'):
+              raise SystemExit('Existing release differs; refusing to overwrite it.')
+          print('The same prerelease already exists; no changes made.')
+          PY
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title 'OmniCodex v0.1.0-alpha.1 — Experimental preview' \
+              --notes-file docs/releases/v0.1.0-alpha.1.md
+          fi

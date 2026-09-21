@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "session_id": "example-only-not-live",
+  "providers": {
+    "context-mode": {
+      "probe_ok": true,
+      "tools": ["ctx_index", "ctx_search", "ctx_execute", "ctx_stats"]
+    },
+    "codebase-memory-mcp": {
+      "probe_ok": true,
+      "tools": ["index_status", "get_graph_schema", "search_graph", "get_code_snippet"],
+      "index_snapshot": "example-workspace-fingerprint"
+    }
+  }
+}

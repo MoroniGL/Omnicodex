@@ -17,6 +17,8 @@ from typing import Any
 
 
 PROFILE_IDS = ("economy", "balanced", "quality", "max")
+# Explicit assets prevent installing arbitrary local files or logs with the skill.
+SKILL_FILES = ("SKILL.md", "references/efficiency.md")
 
 
 class InstallConflict(RuntimeError):
@@ -50,26 +52,29 @@ def _installation_items(repo_root: Path, codex_home: Path, skills_home: Path) ->
         InstallItem(source, codex_home / "agents" / source.name)
         for source in sorted((repo_root / "agents").glob("*.toml"))
     )
-    items.append(
+    items.extend(
         InstallItem(
-            repo_root / "skills" / "omnicodex" / "SKILL.md",
-            skills_home / "omnicodex" / "SKILL.md",
+            repo_root / "skills" / "omnicodex" / relative,
+            skills_home / "omnicodex" / relative,
         )
+        for relative in SKILL_FILES
     )
     return items
 
 
 def _validate_sources(items: list[InstallItem]) -> None:
-    if len(items) != 12:
-        raise ValueError(f"expected 12 OmniCodex assets, found {len(items)}")
+    expected = len(PROFILE_IDS) + 7 + len(SKILL_FILES)
+    if len(items) != expected:
+        raise ValueError(f"expected {expected} OmniCodex assets, found {len(items)}")
     for item in items:
         if not item.source.is_file():
             raise FileNotFoundError(item.source)
         if item.source.suffix == ".toml":
             _load_toml(item.source)
-    skill = items[-1].source.read_text(encoding="utf-8")
+    skill_source = next(item.source for item in items if item.source.name == "SKILL.md")
+    skill = skill_source.read_text(encoding="utf-8")
     if not skill.startswith("---\n") or "\n---\n" not in skill[4:]:
-        raise ValueError(f"skill frontmatter is missing: {items[-1].source}")
+        raise ValueError(f"skill frontmatter is missing: {skill_source}")
 
 
 def _refuse_symlink_destination(path: Path) -> None:
@@ -189,7 +194,7 @@ def _project_config_paths(cwd: Path, codex_home: Path) -> list[Path]:
 
 
 def inspect_profile(codex_home: Path, profile_name: str, cwd: Path) -> dict[str, Any]:
-    """Resolve model fields using Codex's user/profile/project precedence."""
+    """Inspect candidate user/profile/project model layers; not runtime telemetry."""
 
     codex_home = codex_home.resolve()
     profile = codex_home / f"{profile_name}.config.toml"
@@ -233,7 +238,7 @@ def inspect_profile(codex_home: Path, profile_name: str, cwd: Path) -> dict[str,
         "reasoning_effort_source": effort_source,
         "project_overrides_profile": project_override,
         "layers": inspected,
-        "note": "CLI -m/-c overrides are higher priority and are not inferred by this static inspection.",
+        "note": "Static candidate layers only: project trust, managed policy, Desktop state, CLI -m/-c overrides, and actual runtime are not verified.",
     }
 
 

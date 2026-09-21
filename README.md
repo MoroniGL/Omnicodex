@@ -4,31 +4,56 @@
 
 > Use the right intelligence, at the right time.
 
-OmniCodex is an experimental orchestration layer for Codex that routes work by **complexity, risk, quality target, and cost**. Instead of forcing one strategy on every user, OmniCodex provides selectable operating profiles.
+**v0.1.0-alpha.1 — experimental public preview.** This version combines the
+installer/profile work from [PR #2](https://github.com/MoroniGL/Omnicodex/pull/2)
+and the optional context-efficiency work from
+[PR #3](https://github.com/MoroniGL/Omnicodex/pull/3).
+It is not a stable release or a demonstrated subscription-savings guarantee.
+
+OmniCodex separates orchestration from bounded execution and routes work by
+complexity, risk, and cost without lowering the task's acceptance criteria.
 
 ## Profiles
 
-| Profile | Control plane | Workers | Astra policy | Goal |
-|---|---|---|---|---|
-| `economy` | Terra, with Sol when needed | Luna + Terra | Emergency only | Maximize quota life |
-| `balanced` | **Sol / Medium** | Luna + Terra | Exceptional escalation | Strong quality/usage balance |
-| `quality` | **Sol / High** | Terra + Sol | Hard bugs / critical decisions | Favor quality |
-| `max` | **Astra** | Terra + Sol + Astra | Liberal | Maximum capability |
-| `auto` | Adaptive | Adaptive | Adaptive | Select profile from task risk/complexity |
+| Profile | Orchestrator target | Delegation policy |
+|---|---|---|
+| `economy` | Terra / Medium | Luna/Terra first; escalate consequential work |
+| `balanced` | **Sol / Medium** | Luna/Terra execute bounded work; exceptional Astra |
+| `quality` | Sol / High | Terra/Sol workers; Astra for justified hard blockers |
+| `max` | **Astra / High** | Strong control plane with bounded work still delegated |
+| `auto` | Existing parent stays unchanged | Skill selects workers by phase; not a fifth static profile |
 
-**Proposed default: `balanced`.**
+Balanced is the recommended starting profile. The name `max` does not set the
+reasoning effort to `max`: the shipped Max profile requests `high`.
+Model availability and configuration support depend on the installed Codex and account.
 
-## Install
+## Install or update
 
-Requires Codex 0.153.4 or a compatible release and Python 3.11 or newer:
+Use a compatible Codex CLI (the maintainer's smoke tests used **0.153.4**) and
+**Python 3.11+**. Check `python3 --version`; some Macs have an older default Python.
+Use an already installed compatible interpreter where necessary.
+
+From a checkout of this version:
 
 ```sh
+python3 -m unittest discover -s tests -v
 python3 scripts/install.py
 ```
 
-The installer creates a timestamped backup, preserves the base `config.toml`, refuses differing destinations by default, and installs all four namespaced profiles, seven custom roles, and the routing skill. After reviewing a known OmniCodex update, use `--replace-existing`; every replaced file is backed up first.
+The installer installs four namespaced profiles, seven custom agents, and both
+routing-skill files, including `references/efficiency.md`. It checks conflicts
+before writing, creates a private backup, records asset hashes, and preserves the
+base `config.toml`. After reviewing an update, explicitly allow replacement with:
 
-Start a new CLI session with one of the static profiles:
+```sh
+python3 scripts/install.py --replace-existing
+```
+
+This installs OmniCodex assets only. It does not install or register optional MCP
+servers, change hooks, or switch the model of an already-running conversation.
+Review [installation and rollback](docs/local-validation.md) before replacing files.
+
+Start a **new CLI session**:
 
 ```sh
 codex --strict-config -p omnicodex-economy
@@ -37,72 +62,66 @@ codex --strict-config -p omnicodex-quality
 codex --strict-config -p omnicodex-max
 ```
 
-Profiles apply to the new CLI process. They do not change an existing Desktop/IDE conversation or the global model selection. A trusted project `.codex/config.toml` has higher precedence and can override a profile. Inspect the effective static model layers from the directory where you intend to start Codex:
+Profiles do not change an existing Desktop/IDE task. To inspect candidate static
+model layers from the intended working directory:
 
 ```sh
 python3 scripts/install.py --inspect-profile omnicodex-balanced --cwd "$PWD"
 ```
 
-Auto remains a dynamic routing policy in the `omnicodex` skill. Ask the active agent to use **OmniCodex Auto**; it classifies and delegates each phase but does not pretend to mutate the already-running parent model.
+That inspection is not execution telemetry: it does not establish project trust,
+CLI overrides, Desktop selection, or the server's actually served model.
+Ask the active agent to use **OmniCodex Auto** for phase-specific worker selection;
+Auto does not silently change the parent's model.
 
-Even in `max`, the orchestrator should delegate deterministic work when doing so does not reduce quality. Astra does not need to run routine lint or mechanical searches merely because Astra is the control plane.
+## Context & Token Efficiency
 
-## Core model roles
+The routing skill can use **already approved and available** Context Mode or
+codebase-memory-mcp tools. It requires capability checks, source/index freshness,
+retrievable raw evidence, and compact handoffs that preserve failures and risks.
+Without those providers it uses native tools. These are skill-guided policies,
+not an automatic command interceptor or an MCP transport implementation.
 
+```sh
+python3 scripts/efficiency.py doctor
+python3 scripts/efficiency.py plan --profile balanced --task structural
 ```
-Luna  -> high-volume bounded work
-Terra -> exploration and implementation
-Sol   -> orchestration, planning, review, hard reasoning
-Astra -> maximum-capability orchestration or exceptional escalation
-```
 
-Routing is **phase-specific**. OmniCodex can escalate for a difficult decision and then de-escalate for implementation or verification.
+`doctor` is a read-only baseline diagnostic. `plan` is an advisory dry run using
+supplied evidence. Neither proves live MCP access or changes a model.
+Read the [efficiency architecture](docs/context-token-efficiency.md) and
+[benchmark protocol](docs/efficiency-benchmark.md).
 
-## Control plane vs execution plane
+## Validation and limitations
 
-The orchestrator should spend expensive intelligence on decomposition, delegation, acceptance, risk and escalation decisions. Workers perform the bulk of bounded execution.
+- The maintainer reported 26 passing efficiency tests on macOS with Python 3.12.14.
+- A persisted Balanced session recorded Sol/Medium in the parent and Luna/Low
+  and Terra/Medium in real sequential children. These are **local Codex records**,
+  not an independent attestation of the provider-served model.
+- PR #2 contains an earlier, broader maintainer-reported smoke test of all static
+  profiles and seven roles, including Max. It also discloses a planner sentinel
+  output mismatch. Do not treat routing metadata as proof of task quality.
+- The combined source is checked by automated Python tests, including installation
+  of the efficiency reference. CI does not make paid model calls.
+- Context Mode and codebase-memory-mcp were not configured in the latest Mac test.
+  Live integration, quality comparisons, token/allowance savings, and cross-client
+  compatibility remain unverified. No new Max/Astra probe is part of this release preparation.
+- RTK automatic rewriting, persistent project memory, and automatic MCP setup are
+  not implemented. Claude Code cannot use these Codex model/profile files as-is.
 
-A typical `balanced` task:
-
-```
-User request
-    |
-Sol / Medium orchestrator
-    |
-    +--> Luna / Low: bounded search and verification
-    +--> Terra / Medium: exploration and implementation
-    +--> Sol / High: difficult specialist work when justified
-    +--> Astra: exceptional escalation
-    |
-Sol / Medium: acceptance
-```
+See the [release notes](docs/releases/v0.1.0-alpha.1.md), [routing policy](docs/routing.md),
+[profiles](docs/profiles.md), [architecture](docs/architecture.md), and [roadmap](docs/roadmap.md).
 
 ## Principles
 
-- Preserve required quality; optimize waste, not correctness.
-- Strong orchestration can coexist with cheaper execution.
-- Decompose large tasks before routing.
-- Escalate only for a concrete technical reason.
-- De-escalate as soon as the expensive phase is complete.
-- Keep expensive-model context narrow and relevant.
-- Prefer bounded delegation over redundant parallel agents.
-- Tests, review, security and correctness are never skipped to save usage.
-- Never pretend the runtime switched models when it did not.
+Use the least expensive capable worker, not the weakest model regardless of risk.
+Keep planning and acceptance with the chosen orchestrator. Avoid unnecessary
+subagents, broad context dumps, repeated failed work, and stacked output compression.
+Never weaken permissions, security, tests, or acceptance criteria to save usage.
+Never claim model switching from configuration or a worker's self-report alone.
 
-## Status
+## Inspiration and license
 
-**Experimental — all static profiles and custom roles smoke-tested locally on Codex 0.153.4.**
-
-Persisted read-only tests verified Economy, Balanced, Quality, and Max control planes plus all seven native custom roles. Models and efforts were confirmed in runtime turn records, including Sol/Medium delegation to Luna, Terra, Sol, and Astra without explicit spawn overrides. Auto dynamically selected Luna for a narrow read-only phase while correctly preserving the parent model. This does not establish quality or quota savings.
-
-See [local installation, runtime evidence, limitations, and rollback](docs/local-validation.md).
-
-See [routing policy](docs/routing.md), [profiles](docs/profiles.md), [architecture](docs/architecture.md), and [roadmap](docs/roadmap.md).
-
-## Inspiration
-
-OmniCodex was inspired by community work around selective Codex orchestration, including Sol Advisor. Its focus is configurable quality/cost profiles, adaptive routing, context budgeting, escalation, and automatic de-escalation.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+Inspired by selective Codex orchestration, including Sol Advisor. Optional upstream
+tools remain separate projects; their benchmark claims are not OmniCodex results.
+MIT; see [LICENSE](LICENSE).

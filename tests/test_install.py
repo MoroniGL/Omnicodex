@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,7 +38,12 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(len(list((codex_home / "agents").glob("*.toml"))), 7)
             self.assertTrue((skills_home / "omnicodex" / "SKILL.md").is_file())
-            self.assertEqual(len(manifest["files"]), 12)
+            reference = skills_home / "omnicodex" / "references" / "efficiency.md"
+            self.assertEqual(reference.read_bytes(),
+                             (ROOT / "skills/omnicodex/references/efficiency.md").read_bytes())
+            self.assertEqual(len(manifest["files"]), 13)
+            self.assertTrue(any(item["destination"] == str(reference.resolve())
+                                for item in manifest["files"]))
             self.assertEqual(
                 json.loads((codex_home / "omnicodex" / "install-manifest.json").read_text())["result"],
                 "installed",
@@ -75,6 +81,43 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(Path(entry["backup"]).read_text(), 'model = "old-omnicodex"\n')
             self.assertEqual(destination.read_bytes(), (ROOT / "profiles" / "balanced.config.toml").read_bytes())
+
+    def test_reference_conflict_is_rejected_before_installing_other_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "skills/omnicodex/references/efficiency.md"
+            reference.parent.mkdir(parents=True)
+            reference.write_text("Existing custom reference.\n", encoding="utf-8")
+            with self.assertRaises(InstallConflict):
+                install(ROOT, root / "codex", root / "skills")
+            self.assertEqual(reference.read_text(), "Existing custom reference.\n")
+            self.assertFalse((root / "codex").exists())
+
+    def test_reference_replacement_is_backed_up_and_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "skills/omnicodex/references/efficiency.md"
+            reference.parent.mkdir(parents=True)
+            reference.write_text("Previous reference.\n", encoding="utf-8")
+            manifest = install(ROOT, root / "codex", root / "skills", replace_existing=True)
+            entry = next(item for item in manifest["files"]
+                         if item["destination"] == str(reference.resolve()))
+            self.assertEqual(entry["action"], "replaced")
+            self.assertEqual(Path(entry["backup"]).read_text(), "Previous reference.\n")
+            self.assertEqual(reference.read_bytes(),
+                             (ROOT / "skills/omnicodex/references/efficiency.md").read_bytes())
+
+    def test_missing_required_reference_fails_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            for name in ("profiles", "agents", "skills"):
+                shutil.copytree(ROOT / name, source / name)
+            (source / "skills/omnicodex/references/efficiency.md").unlink()
+            with self.assertRaises(FileNotFoundError):
+                install(source, root / "codex", root / "installed-skills")
+            self.assertFalse((root / "codex").exists())
+            self.assertFalse((root / "installed-skills").exists())
 
 
 class ProfileInspectionTests(unittest.TestCase):

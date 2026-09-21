@@ -8,5 +8,8 @@ build/
 coverage/
 *.log
 .tmp/
+
+# Local-only diagnostics, evidence, and Python caches
+.omnicodex/local/
 __pycache__/
 *.py[cod]
