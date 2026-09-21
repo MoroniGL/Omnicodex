@@ -1,5 +1,8 @@
 model = "gpt-6-astra"
 model_reasoning_effort = "high"
+developer_instructions = """
+Use the installed omnicodex routing skill with the Max policy. Keep Astra High as the control plane while delegating deterministic or bounded phases to the cheapest capable installed role when doing so preserves quality.
+"""
 
 [agents]
 enabled = true

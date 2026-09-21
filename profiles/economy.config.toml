@@ -1,5 +1,8 @@
 model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"
+developer_instructions = """
+Use the installed omnicodex routing skill with the Economy policy. Keep Terra Medium as the control plane, use Luna for narrow repeatable work, use Terra for normal exploration and implementation, and escalate only for a concrete blocker or material risk.
+"""
 
 [agents]
 enabled = true

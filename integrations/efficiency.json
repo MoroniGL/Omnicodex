@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "default_profile": "balanced",
+  "profiles": {
+    "economy": {"handoff_target_words": 150},
+    "balanced": {"handoff_target_words": 250},
+    "quality": {"handoff_target_words": 350},
+    "max": {"handoff_target_words": 500},
+    "auto": {"handoff_target_words": 250}
+  },
+  "providers": {
+    "context-mode": {
+      "binary_hint": "context-mode",
+      "required_tools": ["ctx_index", "ctx_search", "ctx_execute", "ctx_stats"],
+      "upstream": "https://github.com/mksglu/context-mode"
+    },
+    "codebase-memory-mcp": {
+      "binary_hint": "codebase-memory-mcp",
+      "required_tools": ["index_status", "get_graph_schema", "search_graph", "get_code_snippet"],
+      "upstream": "https://github.com/DeusData/codebase-memory-mcp"
+    }
+  },
+  "deferred": ["rtk-rewrite", "desktop-commander-per-role-permissions", "persistent-memory-store"],
+  "policy": {
+    "explicit_opt_in": true,
+    "one_output_compressor": true,
+    "native_fallback": true,
+    "raw_evidence_required": true,
+    "automatic_installation": false
+  }
+}
