@@ -62,11 +62,40 @@ Sol / Medium: acceptance
 - Tests, review, security and correctness are never skipped to save usage.
 - Never pretend the runtime switched models when it did not.
 
+## Context & Token Efficiency
+
+Optional, skill-guided adapters now complement model routing:
+
+- **Context Mode:** bounded retrieval of large output, with raw evidence preserved.
+- **codebase-memory-mcp:** structural discovery with worktree/index freshness and source checks.
+- **Compact handoffs:** concise evidence reports without dropping failures or quality gates.
+
+Native tools remain the fallback. No dependency is installed automatically, no
+hooks are enabled, and no Codex/Claude configuration is overwritten. RTK rewriting
+and persistent memory are follow-on work, not active features in this increment.
+
+Read the [architecture and usage guide](docs/context-token-efficiency.md) and
+[benchmark protocol](docs/efficiency-benchmark.md). The manifest is OmniCodex data,
+not client configuration. With Python 3.11+ and no third-party Python dependencies:
+
+```sh
+python3 scripts/efficiency.py doctor
+python3 scripts/efficiency.py plan --profile balanced --task structural
+python3 -m unittest discover -s tests -v
+```
+
+Diagnostics check local binary presence and supplied capability evidence only.
+Plans are **advisory dry runs**, not live MCP probes, model switches, or hook tests.
+See the guide for explicit opt-in and a clearly labeled synthetic inventory example.
+
 ## Status
 
-**v0.1.0 — architecture and policy design.**
+**v0.1.0 — experimental templates, routing skill, and offline efficiency tooling.**
 
-Next: validate the current Codex plugin/custom-agent schema and implement the profiles using supported runtime mechanisms.
+The existing model/profile templates still require validation against the user's
+actual Codex build and account. This increment does not repair or validate profile
+activation and cross-model delegation. No live Codex/Claude integration test,
+percentage saving, or extension of subscription allowance is claimed.
 
 See [routing policy](docs/routing.md), [profiles](docs/profiles.md), [architecture](docs/architecture.md), and [roadmap](docs/roadmap.md).
 
