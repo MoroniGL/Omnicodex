@@ -82,6 +82,43 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(Path(entry["backup"]).read_text(), 'model = "old-omnicodex"\n')
             self.assertEqual(destination.read_bytes(), (ROOT / "profiles" / "balanced.config.toml").read_bytes())
 
+    def test_refuses_symlinked_manifest_directory_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            outside = root / "outside"
+            codex_home.mkdir()
+            outside.mkdir()
+            external_manifest = outside / "install-manifest.json"
+            external_manifest.write_text("external sentinel\n")
+            (codex_home / "omnicodex").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(InstallConflict):
+                install(ROOT, codex_home, skills_home)
+
+            self.assertEqual(external_manifest.read_text(), "external sentinel\n")
+            self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
+
+    def test_replace_existing_does_not_follow_symlinked_manifest_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            manifest_directory = codex_home / "omnicodex"
+            outside = root / "outside"
+            manifest_directory.mkdir(parents=True)
+            outside.mkdir()
+            external_manifest = outside / "manifest.json"
+            external_manifest.write_text("external sentinel\n")
+            (manifest_directory / "install-manifest.json").symlink_to(external_manifest)
+
+            with self.assertRaises(InstallConflict):
+                install(ROOT, codex_home, skills_home, replace_existing=True)
+
+            self.assertEqual(external_manifest.read_text(), "external sentinel\n")
+            self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
+
     def test_reference_conflict_is_rejected_before_installing_other_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
