@@ -116,6 +116,8 @@ def install(
     skills_home = skills_home.resolve()
     items = _installation_items(repo_root, codex_home, skills_home)
     _validate_sources(items)
+    manifest_path = codex_home / "omnicodex" / "install-manifest.json"
+    _refuse_symlink_destination(manifest_path)
 
     conflicts: list[Path] = []
     for item in items:
@@ -134,7 +136,6 @@ def install(
         shutil.copy2(config, backup / "config.toml")
         (backup / "config.toml").chmod(0o600)
 
-    manifest_path = codex_home / "omnicodex" / "install-manifest.json"
     if manifest_path.is_file():
         shutil.copy2(manifest_path, backup / "previous-install-manifest.json")
         (backup / "previous-install-manifest.json").chmod(0o600)
