@@ -1,0 +1,9 @@
+{
+  "name": "omniclaude",
+  "description": "Cost-aware Claude Code routing with focused subagents and optional Jev decision support.",
+  "version": "0.1.0-alpha.0",
+  "author": {
+    "name": "Moroni Gomes Leal",
+    "url": "https://moronigl.dev"
+  }
+}

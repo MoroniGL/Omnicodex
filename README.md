@@ -92,6 +92,40 @@ supplied evidence. Neither proves live MCP access or changes a model.
 Read the [efficiency architecture](docs/context-token-efficiency.md) and
 [benchmark protocol](docs/efficiency-benchmark.md).
 
+## OmniClaude adapter (experimental)
+
+The repository now also carries an experimental Claude Code plugin under
+`adapters/claude-code/`. It packages focused Haiku, Sonnet, and Opus subagents plus
+an OmniClaude routing skill. Claude Code plugins and Codex profiles are different
+runtime formats; neither silently changes an already-running parent model.
+
+Test the plugin locally before installation:
+
+```sh
+claude plugin validate ./adapters/claude-code --strict
+claude --plugin-dir ./adapters/claude-code
+```
+
+## Jev decision layer (experimental, opt-in)
+
+OmniCodex and OmniClaude can optionally use TypeSafe AI's Jev API for narrow typed
+decisions such as route selection, retry strategy, review gating, and completion
+checks. Jev is **not** a coding model and does not replace the orchestrator or
+workers. No API key is stored in the repository and no call occurs unless the
+operator explicitly enables Jev and supplies `JEV_API_KEY`.
+
+The standard-library helper uses TypeSafe's official REST API and discovers models
+with `GET /v1/models` instead of hardcoding a Jev model name:
+
+```sh
+python3 scripts/jev.py doctor
+python3 scripts/jev.py models
+printf '%s' 'bounded task summary' | python3 scripts/jev.py route-task --model '<model-from-models>'
+```
+
+Do not send secrets, source dumps, credentials, or customer data merely to save
+model usage. Jev output is a routing signal, not authorization or proof of correctness.
+
 ## Validation and limitations
 
 - The maintainer reported 26 passing efficiency tests on macOS with Python 3.12.14.
