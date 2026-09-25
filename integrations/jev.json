@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "provider": "typesafe-jev",
+  "base_url": "https://api.typesafe.ai",
+  "models_path": "/v1/models",
+  "decision_path": "/v1/systemone",
+  "auth_env": "JEV_API_KEY",
+  "policy": {
+    "explicit_opt_in_env": "OMNI_JEV",
+    "no_automatic_data_egress": true,
+    "no_secret_persistence": true,
+    "typed_decisions_only": true,
+    "llm_fallback_required": true
+  },
+  "decision_kinds": [
+    "route-task",
+    "retry-strategy",
+    "review-gate",
+    "completion-check"
+  ]
+}

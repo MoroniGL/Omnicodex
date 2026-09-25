@@ -36,7 +36,9 @@ approvals, or use an independent CLI call while claiming it was a child agent.
    paths, constraints, acceptance criteria, and existing evidence, not full history.
 4. For structural discovery or large output, consult
    [optional efficiency adapters](references/efficiency.md) only when needed.
-   Use approved, available providers or native targeted tools.
+   Use approved, available providers or native targeted tools. For bounded routing,
+   retry, review, or completion decisions, consult [Jev](references/jev.md) only when
+   the operator explicitly enables it and the state can be safely externalized.
 5. Diagnose failures before escalation. Escalate for a concrete capability barrier
    or material risk, not merely elapsed time. Do not repeat identical failed work.
 6. Return to cheaper execution after the difficult phase; this changes workers,

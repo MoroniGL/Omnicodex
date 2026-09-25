@@ -41,7 +41,10 @@ class InstallerTests(unittest.TestCase):
             reference = skills_home / "omnicodex" / "references" / "efficiency.md"
             self.assertEqual(reference.read_bytes(),
                              (ROOT / "skills/omnicodex/references/efficiency.md").read_bytes())
-            self.assertEqual(len(manifest["files"]), 13)
+            jev_reference = skills_home / "omnicodex" / "references" / "jev.md"
+            self.assertEqual(jev_reference.read_bytes(),
+                             (ROOT / "skills/omnicodex/references/jev.md").read_bytes())
+            self.assertEqual(len(manifest["files"]), 14)
             self.assertTrue(any(item["destination"] == str(reference.resolve())
                                 for item in manifest["files"]))
             self.assertEqual(
