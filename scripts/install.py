@@ -18,7 +18,7 @@ from typing import Any
 
 PROFILE_IDS = ("economy", "balanced", "quality", "max")
 # Explicit assets prevent installing arbitrary local files or logs with the skill.
-SKILL_FILES = ("SKILL.md", "references/efficiency.md")
+SKILL_FILES = ("SKILL.md", "references/efficiency.md", "references/jev.md")
 
 
 class InstallConflict(RuntimeError):

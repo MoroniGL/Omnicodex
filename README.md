@@ -40,10 +40,10 @@ python3 -m unittest discover -s tests -v
 python3 scripts/install.py
 ```
 
-The installer installs four namespaced profiles, seven custom agents, and both
-routing-skill files, including `references/efficiency.md`. It checks conflicts
-before writing, creates a private backup, records asset hashes, and preserves the
-base `config.toml`. After reviewing an update, explicitly allow replacement with:
+The installer installs four namespaced profiles, seven custom agents, and the
+routing-skill files, including `references/efficiency.md` and `references/jev.md`.
+It checks conflicts before writing, creates a private backup, records asset hashes,
+and preserves the base `config.toml`. After reviewing an update, explicitly allow replacement with:
 
 ```sh
 python3 scripts/install.py --replace-existing
@@ -91,6 +91,47 @@ python3 scripts/efficiency.py plan --profile balanced --task structural
 supplied evidence. Neither proves live MCP access or changes a model.
 Read the [efficiency architecture](docs/context-token-efficiency.md) and
 [benchmark protocol](docs/efficiency-benchmark.md).
+
+## OmniClaude adapter (experimental)
+
+The repository now also carries an experimental Claude Code plugin under
+`adapters/claude-code/`. It packages focused Haiku, Sonnet, and Opus subagents plus
+an OmniClaude routing skill. Claude Code plugins and Codex profiles are different
+runtime formats; neither silently changes an already-running parent model.
+
+Test the plugin locally before installation:
+
+```sh
+claude plugin validate ./adapters/claude-code --strict
+claude --plugin-dir ./adapters/claude-code
+```
+
+## Jev decision layer (experimental, opt-in)
+
+OmniCodex and the OmniClaude adapter share a standard-library Jev helper for narrow
+route/retry/review/completion advice. Select the provider explicitly; it does not
+replace the orchestrator, execute a route, or approve work. No key is bundled.
+
+- Vercel: `--provider vercel`, `AI_GATEWAY_API_KEY`, `typesafe-ai/jev`, `/v1/evaluate`.
+- Direct TypeSafe (default): `--provider typesafe`, `TYPESAFE_API_KEY` or legacy
+  `JEV_API_KEY`, `/v1/systemone`. Use `models` for account-visible direct model IDs.
+
+These commands are offline:
+
+```sh
+python3 scripts/jev.py doctor --provider vercel
+python3 scripts/jev_shadow.py --provider vercel
+```
+
+For an explicitly authorized, credit-consuming probe, set `OMNI_JEV=1` and the
+selected provider key in the process environment, then run
+`python3 scripts/jev_shadow.py --provider vercel --live --limit 6`. It runs at most
+six sequential synthetic requests, stops on errors or unknown costs, and writes
+sanitized receipts locally. No routing or coding model calls occur.
+
+Read [Windows setup, provider contracts and probe limits](docs/jev-decision-layer.md).
+Do not send secrets or source dumps. This is not a task-quality, quota-savings or
+real-router ON/OFF benchmark. Existing profiles and release VERSION are unchanged.
 
 ## Validation and limitations
 

@@ -27,6 +27,15 @@
 - [ ] Evaluate RTK command-specific integration; avoid stacked compression.
 - [ ] Implement opt-in persistent project memory with invalidation and retention policy.
 
+## OmniClaude + Jev — experimental
+- [x] Add a Claude Code plugin skeleton with focused Haiku/Sonnet/Opus workers.
+- [x] Add an opt-in TypeSafe Jev REST helper and shared routing policy.
+- [ ] Validate the plugin with a real local Claude Code runtime.
+- [ ] Benchmark OmniClaude against native Claude Code and opusplan.
+- [ ] Validate Jev route/retry/review/completion decisions on real coding tasks.
+- [ ] Measure whether Jev reduces expensive-model calls without increasing rework.
+- [ ] Decide whether Jev should remain advisory or gain a narrowly scoped hook/MCP adapter.
+
 ## v0.2 — Observability
 - Route decision log.
 - Profile decision log.

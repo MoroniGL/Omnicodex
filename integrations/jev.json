@@ -1,0 +1,33 @@
+{
+  "schema_version": 2,
+  "default_provider": "typesafe",
+  "contract_version": "omni-jev-advisory/2",
+  "providers": {
+    "typesafe": {
+      "base_url": "https://api.typesafe.ai",
+      "models_path": "/v1/models",
+      "decision_path": "/v1/systemone",
+      "auth_env": "TYPESAFE_API_KEY",
+      "legacy_auth_env": "JEV_API_KEY"
+    },
+    "vercel": {
+      "base_url": "https://ai-gateway.vercel.sh",
+      "decision_path": "/v1/evaluate",
+      "auth_env": "AI_GATEWAY_API_KEY",
+      "documented_model": "typesafe-ai/jev",
+      "models_listing": "offline_configured_identifier_not_account_discovery"
+    }
+  },
+  "policy": {
+    "explicit_opt_in_env": "OMNI_JEV",
+    "automatic_provider_fallback": false,
+    "automatic_retries": false,
+    "automatic_actions": false,
+    "redirects": false,
+    "max_state_bytes": 32768,
+    "max_response_bytes": 1048576,
+    "shadow_max_requests": 6
+  },
+  "decision_kinds": ["route-task", "retry-strategy", "review-gate", "completion-check"],
+  "notice": "Descriptive Omni manifest, not Codex/Claude/Vercel configuration or runtime enforcement by itself."
+}
