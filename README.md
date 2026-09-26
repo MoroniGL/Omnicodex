@@ -40,10 +40,10 @@ python3 -m unittest discover -s tests -v
 python3 scripts/install.py
 ```
 
-The installer installs four namespaced profiles, seven custom agents, and both
-routing-skill files, including `references/efficiency.md`. It checks conflicts
-before writing, creates a private backup, records asset hashes, and preserves the
-base `config.toml`. After reviewing an update, explicitly allow replacement with:
+The installer installs four namespaced profiles, seven custom agents, and the
+routing-skill files, including `references/efficiency.md` and `references/jev.md`.
+It checks conflicts before writing, creates a private backup, records asset hashes,
+and preserves the base `config.toml`. After reviewing an update, explicitly allow replacement with:
 
 ```sh
 python3 scripts/install.py --replace-existing
@@ -108,23 +108,30 @@ claude --plugin-dir ./adapters/claude-code
 
 ## Jev decision layer (experimental, opt-in)
 
-OmniCodex and OmniClaude can optionally use TypeSafe AI's Jev API for narrow typed
-decisions such as route selection, retry strategy, review gating, and completion
-checks. Jev is **not** a coding model and does not replace the orchestrator or
-workers. No API key is stored in the repository and no call occurs unless the
-operator explicitly enables Jev and supplies `JEV_API_KEY`.
+OmniCodex and the OmniClaude adapter share a standard-library Jev helper for narrow
+route/retry/review/completion advice. Select the provider explicitly; it does not
+replace the orchestrator, execute a route, or approve work. No key is bundled.
 
-The standard-library helper uses TypeSafe's official REST API and discovers models
-with `GET /v1/models` instead of hardcoding a Jev model name:
+- Vercel: `--provider vercel`, `AI_GATEWAY_API_KEY`, `typesafe-ai/jev`, `/v1/evaluate`.
+- Direct TypeSafe (default): `--provider typesafe`, `TYPESAFE_API_KEY` or legacy
+  `JEV_API_KEY`, `/v1/systemone`. Use `models` for account-visible direct model IDs.
+
+These commands are offline:
 
 ```sh
-python3 scripts/jev.py doctor
-python3 scripts/jev.py models
-printf '%s' 'bounded task summary' | python3 scripts/jev.py route-task --model '<model-from-models>'
+python3 scripts/jev.py doctor --provider vercel
+python3 scripts/jev_shadow.py --provider vercel
 ```
 
-Do not send secrets, source dumps, credentials, or customer data merely to save
-model usage. Jev output is a routing signal, not authorization or proof of correctness.
+For an explicitly authorized, credit-consuming probe, set `OMNI_JEV=1` and the
+selected provider key in the process environment, then run
+`python3 scripts/jev_shadow.py --provider vercel --live --limit 6`. It runs at most
+six sequential synthetic requests, stops on errors or unknown costs, and writes
+sanitized receipts locally. No routing or coding model calls occur.
+
+Read [Windows setup, provider contracts and probe limits](docs/jev-decision-layer.md).
+Do not send secrets or source dumps. This is not a task-quality, quota-savings or
+real-router ON/OFF benchmark. Existing profiles and release VERSION are unchanged.
 
 ## Validation and limitations
 

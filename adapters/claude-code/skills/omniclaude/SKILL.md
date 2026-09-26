@@ -27,15 +27,24 @@ prevents search/log/file volume from polluting the parent context.
 
 ## Optional Jev
 
-If the operator explicitly enabled Jev with `OMNI_JEV=1` and supplied
-`JEV_API_KEY`, Jev may be consulted for narrow typed decisions: route selection,
-retry strategy, review gating, or completion checks. It is not a coding model and
-cannot replace Claude, tests, permissions, or human approval.
+Require operator opt-in (`OMNI_JEV=1`) and an explicit provider:
+- `--provider vercel` uses `AI_GATEWAY_API_KEY` and `typesafe-ai/jev`.
+- `--provider typesafe` uses `TYPESAFE_API_KEY` or legacy `JEV_API_KEY`
+  and an explicitly selected account-visible model.
 
-When this repository checkout is available, use the official helper at
-`scripts/jev.py`. For a standalone plugin copy, Jev remains disabled unless the
-operator supplies an equivalent reviewed helper/tool. Never transmit secrets or
-large source dumps merely to save tokens.
+Never send a Gateway key to direct TypeSafe or switch providers automatically.
+Use only minimized state approved for external transmission. Jev advises on route,
+retry, review and completion; it cannot replace tests, permissions or human approval.
+
+When this repository checkout is available, use `scripts/jev.py` and consult
+`docs/jev-decision-layer.md`. `scripts/jev_shadow.py` previews synthetic cases
+without network access; `--live` separately authorizes up to six paid requests.
+The probe never routes real workers. Errors require retaining the native policy,
+not repeated calls or automatic acceptance. A probability is not proof of completion.
+
+A standalone plugin copy does not bundle the helper. Keep Jev disabled unless the
+operator supplies an equivalent reviewed helper/tool. No new hooks, MCP registration,
+keys, model changes or global configuration are installed by this skill.
 
 ## Acceptance
 

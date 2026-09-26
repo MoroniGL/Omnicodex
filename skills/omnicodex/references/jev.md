@@ -1,40 +1,37 @@
-# Optional Jev decision layer
+# Optional Jev: explicit provider, advisory decisions
 
-Jev is an external TypeSafe AI System One decision model. It returns typed
-probabilistic decisions; it does not write code, browse the repository, execute
-tools, or replace the OmniCodex orchestrator.
+Only use Jev after operator opt-in (`OMNI_JEV=1`), with a minimized state approved
+for external transmission and tools available to this particular runtime.
+Deterministic facts, permissions, retry limits and acceptance gates stay in code.
+Jev never authorizes an action or replaces tests, review or the orchestrator.
 
-Use Jev only when all of these are true:
+Select the provider explicitly:
+- Vercel: `--provider vercel`, `AI_GATEWAY_API_KEY`, model `typesafe-ai/jev`.
+- Direct TypeSafe: `--provider typesafe` (default), `TYPESAFE_API_KEY` or legacy
+  `JEV_API_KEY`, an account-visible model from `models`. Conflicting keys fail.
 
-1. The operator explicitly set `OMNI_JEV=1`.
-2. `JEV_API_KEY` is present in the environment.
-3. The decision is narrow: route selection, retry strategy, review gate, or
-   completion check.
-4. The state can be summarized without credentials, private source dumps,
-   customer data, secrets, or unnecessary proprietary context.
-5. Native deterministic logic cannot answer the question more cheaply and safely.
+Do not send a Vercel key to TypeSafe. Never guess the provider from a key or retry
+through another provider. No credential is bundled, persisted or automatically
+loaded from `.env`. Key presence does not prove API access.
 
-Use `python3 scripts/jev.py doctor` for a non-network configuration check and
-`python3 scripts/jev.py models` to discover models available to the account.
-Never hardcode a model identifier from documentation.
-
-For a bounded routing signal:
+From the repository checkout:
 
 ```sh
-printf '%s' "$SAFE_TASK_SUMMARY" |   python3 scripts/jev.py route-task --model "$JEV_MODEL"
+python3 scripts/jev.py doctor --provider vercel
+python3 scripts/jev_shadow.py --provider vercel
 ```
 
-Interpret the result as a signal, not an instruction. The parent agent retains
-responsibility for permissions, acceptance criteria, model availability, and
-verification. Low confidence or material risk should bias toward review, not
-automatic action.
+Both are offline. The second previews six fictional scenarios. A separate
+operator-approved `--live` invocation consumes credits and records advice only;
+it does not route actual workers. See `docs/jev-decision-layer.md` for PowerShell,
+limits and receipts. A standalone skill installation does not install the helper.
 
-Do not call Jev for:
-- code generation;
-- long-form architecture or debugging;
-- authorization of destructive or security-sensitive actions;
-- decisions already determined by tests, schemas, policy, or static configuration;
-- repeated identical questions after a failure.
+Supported judgments: `route-task`, `retry-strategy`, `review-gate`,
+`completion-check`. For custom state, validate privacy before using `--state-file`.
+`--dry-run` previews the selected payload, so do not share private state output.
+Boolean formats differ across providers and are normalized by the helper.
+Missing metrics are unknown, not zero; no probability threshold proves completion.
 
-If Jev is unavailable, disabled, rejects the request, or returns malformed data,
-fall back transparently to the existing OmniCodex policy. Do not retry repeatedly.
+On errors or unavailable access, retain the native Omni policy. This instruction
+is not a runtime fallback implementation. Never repeat failed paid calls without
+new evidence/authorization, and never replace a failed test with a Jev opinion.
