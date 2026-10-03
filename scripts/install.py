@@ -19,6 +19,16 @@ from typing import Any
 PROFILE_IDS = ("economy", "balanced", "quality", "max")
 # Explicit assets prevent installing arbitrary local files or logs with the skill.
 SKILL_FILES = ("SKILL.md", "references/routing.md", "references/efficiency.md", "references/token-offload.md")
+RUNTIME_FILES = (
+    "scripts/__init__.py",
+    "scripts/efficiency.py",
+    "scripts/offload_scope.py",
+    "scripts/codex_exec_adapter.py",
+    "scripts/offload_telemetry.py",
+    "scripts/free_context_worker.py",
+    "integrations/efficiency.json",
+    "schemas/evidence-pack.schema.json",
+)
 
 
 class InstallConflict(RuntimeError):
@@ -59,11 +69,15 @@ def _installation_items(repo_root: Path, codex_home: Path, skills_home: Path) ->
         )
         for relative in SKILL_FILES
     )
+    items.extend(
+        InstallItem(repo_root / relative, codex_home / "omnicodex" / relative)
+        for relative in RUNTIME_FILES
+    )
     return items
 
 
 def _validate_sources(items: list[InstallItem]) -> None:
-    expected = len(PROFILE_IDS) + 7 + len(SKILL_FILES)
+    expected = len(PROFILE_IDS) + 7 + len(SKILL_FILES) + len(RUNTIME_FILES)
     if len(items) != expected:
         raise ValueError(f"expected {expected} OmniCodex assets, found {len(items)}")
     for item in items:
@@ -71,6 +85,8 @@ def _validate_sources(items: list[InstallItem]) -> None:
             raise FileNotFoundError(item.source)
         if item.source.suffix == ".toml":
             _load_toml(item.source)
+        elif item.source.suffix == ".json":
+            json.loads(item.source.read_text(encoding="utf-8"))
     skill_source = next(item.source for item in items if item.source.name == "SKILL.md")
     skill = skill_source.read_text(encoding="utf-8")
     if not skill.startswith("---\n") or "\n---\n" not in skill[4:]:
@@ -185,12 +201,15 @@ def install(
 def _project_config_paths(cwd: Path, codex_home: Path) -> list[Path]:
     cwd = cwd.resolve()
     ancestors = list(reversed((cwd, *cwd.parents)))
-    user_config = (codex_home / "config.toml").resolve()
+    user_configs = {
+        (codex_home / "config.toml").resolve(),
+        (Path.home() / ".codex" / "config.toml").resolve(),
+    }
     return [
         path
         for base in ancestors
         if (path := base / ".codex" / "config.toml").is_file()
-        and path.resolve() != user_config
+        and path.resolve() not in user_configs
     ]
 
 

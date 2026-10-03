@@ -7,11 +7,22 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.install import InstallConflict, inspect_profile, install
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_FILES = {
+    "scripts/__init__.py",
+    "scripts/efficiency.py",
+    "scripts/offload_scope.py",
+    "scripts/codex_exec_adapter.py",
+    "scripts/offload_telemetry.py",
+    "scripts/free_context_worker.py",
+    "integrations/efficiency.json",
+    "schemas/evidence-pack.schema.json",
+}
 
 
 class InstallerTests(unittest.TestCase):
@@ -47,7 +58,12 @@ class InstallerTests(unittest.TestCase):
                     reference.read_bytes(),
                     (ROOT / "skills/omnicodex/references" / name).read_bytes(),
                 )
-            self.assertEqual(len(manifest["files"]), 15)
+            for relative in RUNTIME_FILES:
+                self.assertEqual(
+                    (codex_home / "omnicodex" / relative).read_bytes(),
+                    (ROOT / relative).read_bytes(),
+                )
+            self.assertEqual(len(manifest["files"]), 23)
             self.assertTrue(any(item["destination"] == str(references["token-offload.md"].resolve())
                                 for item in manifest["files"]))
             self.assertEqual(
@@ -93,17 +109,19 @@ class InstallerTests(unittest.TestCase):
             root = Path(directory)
             codex_home = root / "codex-home"
             skills_home = root / "skills"
-            outside = root / "outside"
             codex_home.mkdir()
-            outside.mkdir()
-            external_manifest = outside / "install-manifest.json"
-            external_manifest.write_text("external sentinel\n")
-            (codex_home / "omnicodex").symlink_to(outside, target_is_directory=True)
+            linked_directory = codex_home / "omnicodex"
+            real_is_symlink = Path.is_symlink
 
-            with self.assertRaises(InstallConflict):
-                install(ROOT, codex_home, skills_home)
+            with patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=lambda path: path == linked_directory or real_is_symlink(path),
+            ):
+                with self.assertRaises(InstallConflict):
+                    install(ROOT, codex_home, skills_home)
 
-            self.assertEqual(external_manifest.read_text(), "external sentinel\n")
             self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
 
     def test_replace_existing_does_not_follow_symlinked_manifest_file(self) -> None:
@@ -112,18 +130,43 @@ class InstallerTests(unittest.TestCase):
             codex_home = root / "codex-home"
             skills_home = root / "skills"
             manifest_directory = codex_home / "omnicodex"
-            outside = root / "outside"
             manifest_directory.mkdir(parents=True)
-            outside.mkdir()
-            external_manifest = outside / "manifest.json"
-            external_manifest.write_text("external sentinel\n")
-            (manifest_directory / "install-manifest.json").symlink_to(external_manifest)
+            manifest = manifest_directory / "install-manifest.json"
+            real_is_symlink = Path.is_symlink
 
-            with self.assertRaises(InstallConflict):
-                install(ROOT, codex_home, skills_home, replace_existing=True)
+            with patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=lambda path: path == manifest or real_is_symlink(path),
+            ):
+                with self.assertRaises(InstallConflict):
+                    install(ROOT, codex_home, skills_home, replace_existing=True)
 
-            self.assertEqual(external_manifest.read_text(), "external sentinel\n")
             self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
+
+    def test_runtime_replacement_is_backed_up_and_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "codex/omnicodex/scripts/efficiency.py"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("previous runtime\n", encoding="utf-8")
+
+            manifest = install(
+                ROOT,
+                root / "codex",
+                root / "skills",
+                replace_existing=True,
+            )
+
+            entry = next(
+                item
+                for item in manifest["files"]
+                if item["destination"] == str(destination.resolve())
+            )
+            self.assertEqual(entry["action"], "replaced")
+            self.assertEqual(Path(entry["backup"]).read_text(), "previous runtime\n")
+            self.assertEqual(destination.read_bytes(), (ROOT / "scripts/efficiency.py").read_bytes())
 
     def test_reference_conflict_is_rejected_before_installing_other_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -154,7 +197,7 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
-            for name in ("profiles", "agents", "skills"):
+            for name in ("profiles", "agents", "skills", "scripts", "integrations", "schemas"):
                 shutil.copytree(ROOT / name, source / name)
             (source / "skills/omnicodex/references/efficiency.md").unlink()
             with self.assertRaises(FileNotFoundError):

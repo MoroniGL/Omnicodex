@@ -31,6 +31,20 @@ class SetupDefaultsTests(unittest.TestCase):
         (self.repo / "skills/omnicodex/SKILL.md").write_text('---\nname: omnicodex\n---\nPolicy\n')
         for name in ("routing", "efficiency", "token-offload"):
             (self.repo / f"skills/omnicodex/references/{name}.md").write_text("Optional reference\n")
+        for relative in (
+            "scripts/__init__.py",
+            "scripts/efficiency.py",
+            "scripts/offload_scope.py",
+            "scripts/codex_exec_adapter.py",
+            "scripts/offload_telemetry.py",
+            "scripts/free_context_worker.py",
+            "integrations/efficiency.json",
+            "schemas/evidence-pack.schema.json",
+        ):
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n" if path.suffix == ".json" else f"fixture {relative}\n",
+                            encoding="utf-8")
         (self.home / "config.toml").write_text('model = "original"\n')
 
     def run_setup(self, **kwargs):
@@ -39,7 +53,7 @@ class SetupDefaultsTests(unittest.TestCase):
     def test_preview_has_no_writes(self):
         result = self.run_setup()
         self.assertEqual(result["mode"], "preview")
-        self.assertEqual(result["assets"], 15)
+        self.assertEqual(result["assets"], 23)
         self.assertFalse((self.home / "omnicodex").exists())
         self.assertFalse(self.skills.exists())
 
@@ -50,7 +64,11 @@ class SetupDefaultsTests(unittest.TestCase):
         self.assertTrue((self.skills / "omnicodex/references/token-offload.md").exists())
         self.assertTrue(d.status(self.home)["managed_block_intact"])
         manifest = json.loads((self.home / "omnicodex/install-manifest.json").read_text())
-        self.assertEqual(len(manifest["files"]), 15)
+        self.assertEqual(len(manifest["files"]), 23)
+        self.assertEqual(
+            (self.home / "omnicodex/scripts/free_context_worker.py").read_text(),
+            "fixture scripts/free_context_worker.py\n",
+        )
 
     def test_setup_update_preserves_selection(self):
         self.run_setup(apply=True, profile="quality")
