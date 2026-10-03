@@ -305,7 +305,8 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
     if expected is not None and expected != captured.fingerprint:
         return ({
             "schema_version": 1, "status": "failed", "route": "native",
-            "reason_code": "snapshot_mismatch", "quota_fallback": False,
+            "reason_code": "snapshot_mismatch", "native_fallback_recommended": True,
+            "quota_fallback": False,
         }, 3)
     provider_available = key_configured and prefix is not None
     metrics, plan = _gate(request, profile, provider_available, efficiency, manifest)

@@ -923,6 +923,8 @@ class WorkerOrchestrationTests(unittest.TestCase):
                 environment={"FREELLMAPI_API_KEY": "configured"},
             )
             self.assertEqual((code, result["reason_code"]), (3, "snapshot_mismatch"))
+            self.assertEqual(result["route"], "native")
+            self.assertTrue(result["native_fallback_recommended"])
             value.pop("expected_snapshot")
             request.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaises(ValueError):
