@@ -18,7 +18,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from scripts import efficiency, offload_scope
-from .base import GenerationResult, ProviderError, safe_diagnostics
+from .base import GenerationResult, ProviderError, request_error_hints, safe_diagnostics
 
 
 API_URL_PREFIX = "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -353,6 +353,7 @@ class GeminiProvider:
             if not isinstance(error, dict):
                 return diagnostics
             diagnostics.update(safe_diagnostics({"provider_error_status": error.get("status")}))
+            diagnostics.update(request_error_hints(error.get("message")))
             details = error.get("details", [])
             for detail in details if isinstance(details, list) else []:
                 if isinstance(detail, dict):
@@ -442,7 +443,7 @@ class GeminiProvider:
         except ProviderError as exc:
             telemetry.update(_safe_usage(exc.telemetry))
             telemetry.update({field: value for field, value in safe_diagnostics(exc.telemetry).items()
-                              if not isinstance(value, str) or not key or key not in value})
+                              if not key or not _contains_secret(value, key)})
             telemetry["elapsed_ms"] = max(0, int((self._clock() - started) * 1000))
             raise ProviderError(exc.reason_code, telemetry) from None
 

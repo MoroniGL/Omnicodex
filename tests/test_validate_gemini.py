@@ -105,6 +105,56 @@ class LiveValidationTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertEqual(report["acceptance"]["profile"], profile)
 
+    def test_request_error_hints_expose_fixed_terms_not_provider_message(self):
+        cases = (
+            ("Invalid responseJsonSchema enum value: acceptance-key", ["json_schema", "schema_enum"]),
+            ("Schema exceeds maximum allowed nesting depth", ["schema_complexity"]),
+            ("Unknown name responseFormat", ["response_format", "unsupported_field"]),
+            ("API key not valid: acceptance-key", ["api_key"]),
+            ("acceptance-key unrelated arbitrary message", []),
+        )
+        for message, expected in cases:
+            body = json.dumps({"error": {"status": "INVALID_ARGUMENT", "message": message}}).encode()
+            with self.subTest(message=message):
+                report, code = validate_gemini.run_validation(
+                    environment={"GEMINI_API_KEY": "acceptance-key"},
+                    transport=lambda *args: (400, {}, body))
+                self.assertEqual(code, 3)
+                self.assertEqual(report["provider_diagnostics"].get("provider_error_hints", []), expected)
+                self.assertNotIn("acceptance-key", json.dumps(report))
+                self.assertNotIn("message", report["provider_diagnostics"])
+
+    def test_request_hint_matching_key_is_omitted(self):
+        body = b'{"error":{"message":"Invalid responseJsonSchema enum"}}'
+        report, code = validate_gemini.run_validation(environment={"GEMINI_API_KEY": "schema_enum"},
+            transport=lambda *args: (400, {}, body))
+        self.assertEqual(code, 3)
+        self.assertNotIn("schema_enum", json.dumps(report))
+
+    def test_malformed_and_oversized_messages_produce_no_hints(self):
+        for message in (None, True, ["acceptance-key"], {"key": "acceptance-key"}, "enum" * 3000):
+            body = json.dumps({"error": {"message": message}}).encode()
+            with self.subTest(message_type=type(message).__name__):
+                report, code = validate_gemini.run_validation(
+                    environment={"GEMINI_API_KEY": "acceptance-key"},
+                    transport=lambda *args: (400, {}, body))
+                self.assertEqual(code, 3)
+                self.assertNotIn("provider_error_hints", report["provider_diagnostics"])
+                self.assertNotIn("acceptance-key", json.dumps(report))
+
+    def test_injected_hints_are_allowlisted_and_bounded(self):
+        from scripts.providers.base import ProviderError
+        for hints, expected in ((["api_key", "acceptance-key", ["secret"], "api_key"], ["api_key"]),
+                                (["api_key"] * 11, [])):
+            def fail(*args):
+                raise ProviderError("provider_failed", {"provider_error_hints": hints})
+            with self.subTest(hint_count=len(hints)):
+                report, code = validate_gemini.run_validation(
+                    environment={"GEMINI_API_KEY": "acceptance-key"}, transport=fail)
+                self.assertEqual(code, 3)
+                self.assertEqual(report["provider_diagnostics"].get("provider_error_hints", []), expected)
+                self.assertNotIn("acceptance-key", json.dumps(report))
+
     def test_invalid_configuration_is_rejected_before_any_request(self):
         calls = []
         for profile, timeout in (("invalid", 1), ("balanced", 0), ("balanced", float("nan")),

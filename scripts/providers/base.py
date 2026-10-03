@@ -17,6 +17,28 @@ _DIAGNOSTIC_CODES = {
         "http_protocol_error", "request_encoding_error", "transport_error")),
 }
 
+_REQUEST_HINT_TERMS = {
+    "json_schema": ("responsejsonschema", "response_json_schema"),
+    "response_format": ("responseformat", "response_format", "responsemimetype", "response_mime_type"),
+    "schema_enum": ("enum",),
+    "schema_complexity": ("nesting depth", "too complex", "too many states", "schema complexity"),
+    "schema_type": ("type_string", "type_number", "invalid type", "expected type"),
+    "schema_array_bounds": ("maxitems", "minitems", "max_items", "min_items"),
+    "output_token_limit": ("maxoutputtokens", "max_output_tokens"),
+    "api_key": ("api key", "api_key"),
+    "model": ("model",),
+    "unsupported_field": ("unknown name", "unsupported field", "unrecognized field"),
+}
+
+
+def request_error_hints(message: Any) -> dict[str, Any]:
+    """Return fixed lexical hints, never a message excerpt or a diagnosis."""
+    if not isinstance(message, str) or len(message) > 8192:
+        return {}
+    lowered = message.lower()
+    hints = [code for code, terms in _REQUEST_HINT_TERMS.items() if any(term in lowered for term in terms)]
+    return {"provider_error_hints": hints} if hints else {}
+
 
 def safe_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
     """Retain a numeric HTTP status and fixed codes; never arbitrary provider text."""
@@ -28,6 +50,12 @@ def safe_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
         item = value.get(field)
         if isinstance(item, str) and item in allowed:
             result[field] = item
+    hints = value.get("provider_error_hints")
+    if isinstance(hints, list) and len(hints) <= len(_REQUEST_HINT_TERMS):
+        recognized = list(dict.fromkeys(item for item in hints
+                          if isinstance(item, str) and item in _REQUEST_HINT_TERMS))
+        if recognized:
+            result["provider_error_hints"] = recognized
     return result
 
 

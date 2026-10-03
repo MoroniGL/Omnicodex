@@ -128,6 +128,11 @@ API status/reason codes, or a fixed transport category such as `tls_error` or
 exception text, or the key. Unknown diagnostic codes are omitted. Configuration
 READY still does not mean connectivity has been verified.
 
+For HTTP request errors, `provider_error_hints` contains only fixed labels for
+terms in the provider message, such as `schema_enum`, `schema_complexity`,
+`json_schema`, or `api_key`. These are lexical hints, not a verified diagnosis.
+No message excerpt is returned; unknown terms and oversized messages are omitted.
+
 HTTP 404 / `NOT_FOUND` for `gemini-2.5-flash-lite` can reflect model access:
 [Google limits Gemini 2.5 access to existing users](https://ai.google.dev/gemini-api/docs/deprecations)
 and recommends `gemini-3.5-flash-lite` for new projects (checked 2026-10-03).
