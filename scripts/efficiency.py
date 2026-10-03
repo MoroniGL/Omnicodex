@@ -169,12 +169,17 @@ def make_plan(manifest: dict[str, Any], inventory: dict[str, Any] | None,
 
 
 
-def validate_offload_metrics(data: dict[str, Any]) -> None:
+def validate_offload_metrics(data: dict[str, Any], require_provider_available: bool = True) -> None:
     require(data.get("schema_version") == 1, "Unsupported offload metrics schema")
     require(data.get("task_kind") in OFFLOAD_TASKS, "Unknown offload task")
     require(data.get("data_classification") in DATA_CLASSES, "Unknown data classification")
     require(type(data.get("external_offload_approved")) is bool, "Approval must be boolean")
-    require(type(data.get("provider_available")) is bool, "Provider availability must be boolean")
+    if require_provider_available:
+        require(type(data.get("provider_available")) is bool,
+                "Provider availability must be boolean")
+    elif "provider_available" in data:
+        require(type(data["provider_available"]) is bool,
+                "Provider availability must be boolean")
     for key in ("estimated_chars", "file_count", "diff_lines", "log_bytes", "search_hits"):
         require(type(data.get(key)) is int and 0 <= data[key] <= 10_000_000_000,
                 "Invalid offload metric")
