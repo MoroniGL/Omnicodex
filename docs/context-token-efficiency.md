@@ -1,6 +1,6 @@
 # Context & Token Efficiency Architecture
 
-Status: experimental, first integration increment. Reviewed 2026-09-21.
+Status: experimental, live worker implemented. Reviewed 2026-10-03.
 
 ## Scope
 
@@ -24,6 +24,36 @@ provider never changes the orchestrator or authorizes a more expensive model.
 The existing model/profile TOML templates still need installation-specific runtime
 validation. Auto in this increment is not an automatic model-switching engine.
 
+## FreeLLMAPI token-offload path
+
+FreeLLMAPI is an optional context reader, never the OmniCodex root provider and
+never a response to OpenAI quota exhaustion.
+
+```text
+premium parent
+  -> deterministic search/stat/path narrowing
+  -> ContextCostGate
+     -> small/ineligible: native parent path
+     -> large + approved + nonsensitive
+        -> immutable bounded scope capture
+        -> private staged copy
+        -> one ephemeral read-only Codex exec using FreeLLMAPI
+        -> local EvidencePack validation + workspace re-snapshot
+        -> compact pack to parent
+        -> parent opens exact cited ranges and accepts or rejects
+```
+
+The original source bytes are not placed in the prompt. The worker receives the
+task kind, concise objective, approved repo-relative names, snapshot, and pack
+budgets, then reads the staged files itself. `--ephemeral`, `--sandbox read-only`,
+`--output-schema`, JSONL events, `--output-last-message`, and per-invocation
+provider overrides isolate the worker without changing global or parent provider
+configuration. Web search is disabled and the staged workspace has no Git state.
+
+The local validator rejects unknown fields, wrong task/snapshot, out-of-scope
+files, invalid or missing line evidence, oversized packs, and a changed source
+snapshot. A failed or stale pack is never promoted to evidence.
+
 ## Provider contracts
 
 | Provider | First increment | Required gate | Native fallback |
@@ -33,6 +63,7 @@ validation. Auto in this increment is not an automatic model-switching engine.
 | RTK | Documented follow-on only | Future command-specific compatibility and exit-code tests | No automatic rewrite |
 | Caveman-inspired brevity | Original structured handoff policy | Keep evidence, identifiers and failures intact | Longer report when necessary |
 | Desktop Commander | Optional future tool provider | Actual host permissions, not just prompt instructions | Native tools |
+| FreeLLMAPI | Direct read-only processing of large approved context | ContextCostGate, explicit externalization approval, privacy scan, immutable scope, valid EvidencePack | Native parent path with transparent reason/status |
 
 Provider code is not vendored. Upstream licenses and installation/release checks
 remain the user's responsibility when installing those separate projects. The
@@ -82,6 +113,21 @@ It does not open authentication/configuration files or scan the project. Missing
 optional providers are normal. A zero exit status means the diagnostic itself
 completed, not that Codex/MCP/model overrides work. Invalid inputs exit with 2.
 
+The installed live-worker diagnostic is also offline:
+
+```sh
+python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
+```
+
+It reports whether `codex` and `FREELLMAPI_API_KEY` are locally available. It
+does not contact FreeLLMAPI, expose the key, verify a runtime model, or claim a
+working gateway. `dry-run` validates a bounded request, captures its approved
+scope, runs the gate, and displays a sanitized command without making a network
+request. `run` invokes one Codex worker process; it never loops across identical
+failures or promotes FreeLLMAPI to orchestrator. FreeLLMAPI may perform its own
+provider routing, which is outside OmniCodex's retry control and is recorded only
+when reliable runtime telemetry exposes it.
+
 With no inventory and explicit provider opt-in, plans select native tools. To
 exercise the decision logic with **synthetic data only**:
 
@@ -96,6 +142,35 @@ python3 scripts/efficiency.py plan \
 The output always says `advisory_dry_run`. It executes nothing, changes no model,
 and does not independently verify supplied evidence. Omit `--enable` to disable
 optional selection even when tools are reported available.
+
+## Privacy and credential boundary
+
+FreeLLMAPI can route to third-party free providers. Public workspaces and
+explicitly approved private workspaces are eligible. Private workspaces without
+approval stay native. Sensitive paths or content fail closed, including `.env`,
+credentials/tokens/passwords, private keys, auth files, secret-bearing dumps,
+binary files, and unrelated conversation or environment history.
+
+`FREELLMAPI_API_KEY` remains in the process environment. It is never written to
+the request, argv, prompt, receipt, or installed configuration. The Codex model
+provider receives it, while the worker's shell environment policy explicitly
+excludes it from model-initiated commands. Provider output is checked for the
+credential before any result is accepted.
+
+## Receipts and failure behavior
+
+Accepted runs write `evidence-pack.json` and `receipt.json` to a fresh private
+directory outside the workspace. Receipts separate `estimated_raw_tokens`,
+`estimated_evidence_pack_tokens`, and `estimated_premium_context_avoided` from
+actual worker input/cached-input/output/reasoning tokens. Served provider/model
+and retry/fallback counts remain `null` unless reliable runtime evidence exposes
+them. Root usage is recorded separately when available; billing and subscription
+allowance are always unverified unless measured elsewhere.
+
+Missing key/Codex produces a transparent native fallback. Unavailable gateway,
+timeout, nonzero exit, malformed output, credential leakage, invalid evidence,
+or workspace mutation produces a failed receipt and recommends native handling.
+There is no destructive retry and no quota-triggered route.
 
 ### Real capability inventory
 

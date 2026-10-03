@@ -11,5 +11,6 @@ coverage/
 
 # Local-only diagnostics, evidence, and Python caches
 .omnicodex/local/
+.superpowers/
 __pycache__/
 *.py[cod]

@@ -9,6 +9,9 @@ Validated with Codex CLI **0.153.4** on macOS. This is a routing smoke test, not
 | `agents/*.toml` | `$CODEX_HOME/agents/*.toml` (default `~/.codex/agents/`) |
 | `profiles/*.config.toml` | `$CODEX_HOME/omnicodex-<profile>.config.toml` |
 | `skills/omnicodex/SKILL.md` | `~/.agents/skills/omnicodex/SKILL.md` |
+| Token-offload runtime scripts | `$CODEX_HOME/omnicodex/scripts/` |
+| `integrations/efficiency.json` | `$CODEX_HOME/omnicodex/integrations/efficiency.json` |
+| `schemas/evidence-pack.schema.json` | `$CODEX_HOME/omnicodex/schemas/evidence-pack.schema.json` |
 
 Run `python3 scripts/install.py`. Before writing, the installer backs up the existing `config.toml` and any destination files to a private, timestamped directory. It refuses conflicting destinations instead of overwriting them unless a reviewed update explicitly uses `--replace-existing`. It records hashes and whether each destination already existed. The seven agent definitions use the supported standalone schema (`name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`). The routing skill needs YAML `name` and `description` frontmatter to be discoverable.
 
@@ -69,3 +72,66 @@ CI validates declarative assets and checks whitespace against the changed commit
 For rollback, remove only files introduced by this installation whose current hashes still match the install manifest. Restore backed-up files only if they were actually replaced. Preserve subsequent user edits and unrelated configuration. Since this procedure leaves the base `config.toml` unchanged, restoring it is unnecessary unless it was separately changed.
 
 Official references: [Custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents) and [configuration samples](https://developers.openai.com/codex/config-sample).
+
+## FreeLLMAPI worker validation
+
+The worker uses the existing Codex Responses integration per invocation. It does
+not replace the root provider or write credentials/provider configuration to
+disk. Its required `codex exec` flag surface was rechecked with Codex CLI 0.160.0
+on Windows on 2026-10-03; that check did not exercise a live gateway. First
+verify offline prerequisites:
+
+```powershell
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
+$worker = Join-Path $codexHome 'omnicodex\scripts\free_context_worker.py'
+python $worker doctor
+```
+
+`key_configured` and `codex_available` must be true before a live run.
+`gateway_probed` and `runtime_model_verified` intentionally remain false in
+doctor output.
+
+For a controlled Windows acceptance, start the local FreeLLMAPI gateway and set
+`FREELLMAPI_API_KEY` in the current shell. Set `FREELLMAPI_BASE_URL` only for a
+non-default gateway. Then create a disposable workspace and request outside it:
+
+```powershell
+$case = Join-Path ([IO.Path]::GetTempPath()) ('omnicodex-live-' + [guid]::NewGuid())
+$workspace = Join-Path $case 'workspace'
+$artifacts = Join-Path $case 'artifacts'
+New-Item -ItemType Directory -Path $workspace | Out-Null
+1..5000 | ForEach-Object { "synthetic public evidence line $_" } |
+  Set-Content -Encoding utf8 (Join-Path $workspace 'evidence.txt')
+$request = @{
+  schema_version = 1; task_kind = 'long_doc_digest';
+  objective = 'Summarize the synthetic numbered evidence and cite exact lines.';
+  approved_paths = @('evidence.txt'); data_classification = 'public';
+  external_offload_approved = $true;
+  metrics = @{ schema_version = 1; task_kind = 'long_doc_digest';
+    estimated_chars = 160000; file_count = 1; diff_lines = 0;
+    log_bytes = 0; search_hits = 1; data_classification = 'public';
+    external_offload_approved = $true; independent_units = 1 }
+} | ConvertTo-Json -Depth 4
+$requestPath = Join-Path $case 'request.json'
+[IO.File]::WriteAllText($requestPath, $request, [Text.UTF8Encoding]::new($false))
+$before = (Get-FileHash (Join-Path $workspace 'evidence.txt')).Hash
+$config = Join-Path $codexHome 'config.toml'
+$configBefore = if (Test-Path $config) { (Get-FileHash $config).Hash } else { $null }
+python $worker dry-run --workspace $workspace --request $requestPath --profile balanced
+python $worker run --workspace $workspace --request $requestPath --profile balanced --artifacts $artifacts
+$after = (Get-FileHash (Join-Path $workspace 'evidence.txt')).Hash
+if ($before -ne $after) { throw 'workspace changed' }
+$configAfter = if (Test-Path $config) { (Get-FileHash $config).Hash } else { $null }
+if ($configBefore -ne $configAfter) { throw 'global Codex config changed' }
+python (Join-Path $codexHome 'omnicodex\scripts\efficiency.py') validate-pack `
+  --pack (Join-Path $artifacts 'evidence-pack.json')
+Get-Content (Join-Path $artifacts 'receipt.json')
+```
+
+Accept the live test only if the dry run selected `free_context_worker`, the run
+created a locally valid pack, source hashes match, evidence ranges resolve, and
+the receipt reports an accepted single worker run. Confirm the pack is compact
+and contains no full source. Record requested model `auto`; record served
+provider/model only when supported runtime evidence—not worker prose—provides
+it. Actual root usage will commonly remain `null`. Never print the environment
+key, and verify the user's global Codex config hash is unchanged.

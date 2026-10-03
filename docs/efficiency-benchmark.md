@@ -60,3 +60,10 @@ For these conditions, record estimated raw candidate context, EvidencePack size,
 actual worker provider/model when visible, worker usage, root input/cached-input,
 and task acceptance. Estimated premium context avoided is not a billing record
 and must not be translated directly into subscription allowance.
+
+Run native and offload conditions from identical clean snapshots. Hash the
+complete synthetic workspace before and after each run, retain the compact pack
+and receipt, and independently reopen every cited range used for acceptance.
+Report missing telemetry as `null`; do not copy a worker's prose claim about its
+model/provider into runtime evidence. Record failed-run rows for unavailable,
+timeout, invalid-pack, and stale-workspace behavior instead of omitting failures.

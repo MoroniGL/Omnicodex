@@ -40,8 +40,9 @@ python3 -m unittest discover -s tests -v
 python3 scripts/install.py
 ```
 
-The installer installs four namespaced profiles, seven custom agents, and both
-routing-skill files, including `references/efficiency.md`. It checks conflicts
+The installer installs four namespaced profiles, seven custom agents, the
+progressive-disclosure routing skill, and the optional token-offload runtime
+under `$CODEX_HOME/omnicodex/`. It checks conflicts
 before writing, creates a private backup, records asset hashes, and preserves the
 base `config.toml`. After reviewing an update, explicitly allow replacement with:
 
@@ -92,6 +93,34 @@ supplied evidence. Neither proves live MCP access or changes a model.
 Read the [efficiency architecture](docs/context-token-efficiency.md) and
 [benchmark protocol](docs/efficiency-benchmark.md).
 
+### Optional FreeLLMAPI context worker
+
+For an explicitly approved public or private workspace, OmniCodex can send a
+bounded metadata-only task to an isolated `codex exec` worker configured for a
+local FreeLLMAPI gateway. The worker reads a private staged copy directly and
+returns a source-linked EvidencePack. The premium parent still owns planning,
+implementation, consequential decisions, evidence inspection, and acceptance.
+
+This is not quota fallback. Small tasks stay native, sensitive content is
+rejected, and the parent is never switched to FreeLLMAPI. Setup is environment
+only:
+
+```sh
+export FREELLMAPI_API_KEY='set-locally-never-commit'
+# Optional; defaults to http://127.0.0.1:3001/v1
+export FREELLMAPI_BASE_URL='http://127.0.0.1:3001/v1'
+python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
+```
+
+`doctor` is offline: it reports only local key/Codex prerequisites and does not
+probe the gateway or verify a served model. See the
+[architecture and privacy contract](docs/context-token-efficiency.md) and the
+[controlled acceptance procedure](docs/local-validation.md).
+
+`omni status` continues to report the saved/session profile policy and actual
+parent metadata when available; it does not claim the optional worker or gateway
+is live. Use the worker's `doctor` action for its separate local prerequisites.
+
 ## Validation and limitations
 
 - The maintainer reported 26 passing efficiency tests on macOS with Python 3.12.14.
@@ -106,6 +135,9 @@ Read the [efficiency architecture](docs/context-token-efficiency.md) and
 - Context Mode and codebase-memory-mcp were not configured in the latest Mac test.
   Live integration, quality comparisons, token/allowance savings, and cross-client
   compatibility remain unverified. No new Max/Astra probe is part of this release preparation.
+- The FreeLLMAPI worker has comprehensive offline coverage. A real gateway test
+  must only be claimed when a running gateway and environment key were actually
+  present; worker estimates are not verified billing or subscription savings.
 - RTK automatic rewriting, persistent project memory, and automatic MCP setup are
   not implemented. Claude Code cannot use these Codex model/profile files as-is.
 
