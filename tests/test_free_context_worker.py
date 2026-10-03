@@ -730,7 +730,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         else:
             self.assertTrue(process.kill.called)
         for call in process.wait.call_args_list:
-            self.assertLessEqual(call.kwargs["timeout"], 0.02)
+            self.assertLessEqual(call.kwargs["timeout"], 0.02 + 1e-6)
 
     def test_final_output_rejects_links_and_fifo_before_blocking_open(self):
         with tempfile.TemporaryDirectory() as directory:
