@@ -1,6 +1,11 @@
 """Safety contract tests for bounded FreeLLMAPI worker inputs."""
 import hashlib
 import importlib.util
+import json
+import os
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +18,20 @@ SPEC = importlib.util.spec_from_file_location(
 )
 offload_scope = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(offload_scope)
+
+
+def _load_optional_module(name):
+    path = ROOT / "scripts" / f"{name}.py"
+    if not path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+codex_exec_adapter = _load_optional_module("codex_exec_adapter")
+offload_telemetry = _load_optional_module("offload_telemetry")
 
 
 class FreeContextWorkerTests(unittest.TestCase):
@@ -488,6 +507,138 @@ class FreeContextWorkerTests(unittest.TestCase):
                 with self.subTest(evidence=bad):
                     with self.assertRaises(ValueError):
                         offload_scope.validate_evidence_references(root, scope, bad)
+
+
+class CodexExecAdapterTests(unittest.TestCase):
+    """Contract tests for the isolated worker boundary.
+
+    Removing a required argv boundary, accepting a shell command, or exposing
+    raw process output must make one of these tests fail.
+    """
+
+    def adapter(self):
+        self.assertIsNotNone(codex_exec_adapter, "codex exec adapter is missing")
+        return codex_exec_adapter
+
+    def telemetry(self):
+        self.assertIsNotNone(offload_telemetry, "offload telemetry parser is missing")
+        return offload_telemetry
+
+    def build_argv(self, endpoint=None):
+        return self.adapter().build_codex_exec_argv(
+            ("codex with spaces",), Path("C:/stage dir"), Path("C:/schema dir/pack schema.json"),
+            Path("C:/output dir/last message.json"), endpoint=endpoint,
+        )
+
+    def test_build_argv_has_exact_isolation_provider_and_secret_boundaries(self):
+        argv = self.build_argv()
+        self.assertEqual(argv[:4], ["codex with spaces", "-a", "never", "exec"])
+        self.assertEqual(argv[-1], "-")
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+        self.assertIn("--ephemeral", argv)
+        self.assertIn("--json", argv)
+        self.assertIn("--ignore-user-config", argv)
+        self.assertIn("--strict-config", argv)
+        self.assertIn("--skip-git-repo-check", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "auto")
+        self.assertEqual(argv[argv.index("--cd") + 1], str(Path("C:/stage dir")))
+        self.assertEqual(argv[argv.index("--output-schema") + 1],
+                         str(Path("C:/schema dir/pack schema.json")))
+        self.assertEqual(argv[argv.index("--output-last-message") + 1],
+                         str(Path("C:/output dir/last message.json")))
+        settings = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
+        self.assertEqual(settings, [
+            'model_provider="freellmapi"',
+            'model_providers.freellmapi.name="FreeLLMAPI"',
+            'model_providers.freellmapi.base_url="http://127.0.0.1:3001/v1"',
+            'model_providers.freellmapi.wire_api="responses"',
+            'model_providers.freellmapi.env_key="FREELLMAPI_API_KEY"',
+            'model_providers.freellmapi.requires_openai_auth=false',
+            'web_search="disabled"',
+            'shell_environment_policy.ignore_default_excludes=false',
+            'shell_environment_policy.exclude=["FREELLMAPI_API_KEY"]',
+        ])
+        self.assertNotIn("secret-value", " ".join(argv))
+
+    def test_build_argv_validates_custom_endpoint_and_formats_for_windows_and_posix(self):
+        argv = self.build_argv("https://gateway.example/v1")
+        self.assertIn('model_providers.freellmapi.base_url="https://gateway.example/v1"', argv)
+        self.assertIn('"codex with spaces"', self.adapter().format_command(argv, platform="windows"))
+        self.assertIn("'codex with spaces'", self.adapter().format_command(argv, platform="posix"))
+        self.assertEqual(self.adapter().format_command(argv, platform="windows"), subprocess.list2cmdline(argv))
+        self.assertEqual(self.adapter().format_command(argv, platform="posix"), shlex.join(argv))
+        for endpoint in ("file:///not-a-provider", ""):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                self.build_argv(endpoint)
+
+    def fake_prefix(self, directory):
+        fake = Path(directory) / "fake_codex.py"
+        fake.write_text(
+            "import json, os, pathlib, sys, time\n"
+            "args = sys.argv[1:]\n"
+            "mode = os.environ.get('FAKE_CODEX_MODE', 'success')\n"
+            "prompt = sys.stdin.read()\n"
+            "if mode == 'timeout': time.sleep(5)\n"
+            "if mode == 'malformed': print('{not json}')\n"
+            "else: print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 12, 'cached_input_tokens': 3, 'output_tokens': 4, 'reasoning_output_tokens': 2}, 'model': 'served-model', 'provider': 'served-provider', 'retry_count': 1, 'fallback_count': 0}))\n"
+            "if mode == 'nonzero': sys.exit(7)\n"
+            "if mode != 'missing': pathlib.Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps({'status': 'completed', 'summary': 'ok', 'prompt_has_staged_content': 'staged-secret-content' in prompt}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        return (sys.executable, str(fake))
+
+    def execute_fake(self, mode):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged = root / "stage"
+            staged.mkdir()
+            (staged / "only-approved.txt").write_text("staged-secret-content", encoding="utf-8")
+            output = root / "result.json"
+            argv = self.adapter().build_codex_exec_argv(
+                self.fake_prefix(directory), staged, ROOT / "schemas" / "evidence-pack.schema.json", output
+            )
+            env = dict(os.environ, FAKE_CODEX_MODE=mode, FREELLMAPI_API_KEY="secret-value")
+            return self.adapter().execute_codex_exec(
+                argv, "Read the staged workspace and return the schema result.", timeout_seconds=0.2,
+                environment=env,
+            )
+
+    def test_execute_real_subprocess_returns_sanitized_success_without_prompt_file_contents(self):
+        result = self.execute_fake("success")
+        self.assertEqual(result["outcome"], "completed")
+        self.assertEqual(result["exit_code"], 0)
+        self.assertFalse(result["final_message"]["prompt_has_staged_content"])
+        self.assertNotIn("stdout", result)
+        self.assertNotIn("stderr", result)
+        self.assertNotIn("secret-value", json.dumps(result))
+
+    def test_execute_real_subprocess_reports_timeout_nonzero_malformed_and_missing_output(self):
+        expectations = {
+            "timeout": ("timeout", None),
+            "nonzero": ("nonzero_exit", 7),
+            "malformed": ("malformed_output", 0),
+            "missing": ("missing_output", 0),
+        }
+        for mode, expected in expectations.items():
+            with self.subTest(mode=mode):
+                result = self.execute_fake(mode)
+                self.assertEqual((result["outcome"], result["exit_code"]), expected)
+                self.assertNotIn("stdout", result)
+                self.assertNotIn("stderr", result)
+
+    def test_telemetry_extracts_only_designated_runtime_usage_and_fails_closed_on_bad_json(self):
+        raw = "\n".join((
+            json.dumps({"type": "message", "usage": {"input_tokens": 999}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12, "cached_input_tokens": 3, "output_tokens": 4, "reasoning_output_tokens": 2}, "model": "served-model", "provider": "served-provider", "retry_count": 1, "fallback_count": 0}),
+        ))
+        telemetry = self.telemetry().parse_jsonl_usage(raw.encode("utf-8"))
+        self.assertEqual(telemetry, {
+            "input_tokens": 12, "cached_input_tokens": 3, "output_tokens": 4,
+            "reasoning_output_tokens": 2, "served_model": "served-model",
+            "served_provider": "served-provider", "retry_count": 1, "fallback_count": 0,
+        })
+        with self.assertRaises(ValueError):
+            self.telemetry().parse_jsonl_usage(b'{not json}\n')
 
 
 if __name__ == "__main__":
