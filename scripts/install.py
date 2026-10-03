@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import tomllib
 from dataclasses import dataclass
@@ -94,10 +95,18 @@ def _validate_sources(items: list[InstallItem]) -> None:
 
 
 def _refuse_symlink_destination(path: Path) -> None:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     current = path
     while True:
-        if current.is_symlink():
-            raise InstallConflict(f"refusing symlink destination: {path}")
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(info.st_mode) or bool(
+                getattr(info, "st_file_attributes", 0) & reparse_flag
+            ):
+                raise InstallConflict(f"refusing link or reparse destination: {path}")
         if current == current.parent:
             return
         current = current.parent

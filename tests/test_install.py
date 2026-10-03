@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.install import InstallConflict, inspect_profile, install
@@ -111,13 +113,14 @@ class InstallerTests(unittest.TestCase):
             skills_home = root / "skills"
             codex_home.mkdir()
             linked_directory = codex_home / "omnicodex"
-            real_is_symlink = Path.is_symlink
+            real_lstat = Path.lstat
+            symlink = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0)
 
             with patch.object(
                 Path,
-                "is_symlink",
+                "lstat",
                 autospec=True,
-                side_effect=lambda path: path == linked_directory or real_is_symlink(path),
+                side_effect=lambda path: symlink if path == linked_directory else real_lstat(path),
             ):
                 with self.assertRaises(InstallConflict):
                     install(ROOT, codex_home, skills_home)
@@ -132,16 +135,41 @@ class InstallerTests(unittest.TestCase):
             manifest_directory = codex_home / "omnicodex"
             manifest_directory.mkdir(parents=True)
             manifest = manifest_directory / "install-manifest.json"
-            real_is_symlink = Path.is_symlink
+            real_lstat = Path.lstat
+            symlink = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0)
 
             with patch.object(
                 Path,
-                "is_symlink",
+                "lstat",
                 autospec=True,
-                side_effect=lambda path: path == manifest or real_is_symlink(path),
+                side_effect=lambda path: symlink if path == manifest else real_lstat(path),
             ):
                 with self.assertRaises(InstallConflict):
                     install(ROOT, codex_home, skills_home, replace_existing=True)
+
+            self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
+
+    def test_refuses_windows_reparse_manifest_directory_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            codex_home.mkdir()
+            reparse_directory = codex_home / "omnicodex"
+            real_lstat = Path.lstat
+            reparse = SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+            )
+
+            with patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=lambda path: reparse if path == reparse_directory else real_lstat(path),
+            ):
+                with self.assertRaises(InstallConflict):
+                    install(ROOT, codex_home, skills_home)
 
             self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
 
@@ -209,11 +237,18 @@ class InstallerTests(unittest.TestCase):
 class ProfileInspectionTests(unittest.TestCase):
     def test_user_config_is_not_reloaded_as_a_project_layer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            codex_home = home / ".codex"
+            root = Path(directory)
+            home = root / "user-home"
+            codex_home = root / "selected-codex-home"
             project = home / "project"
+            actual_user_config = (Path.home() / ".codex" / "config.toml").resolve()
+            real_is_file = Path.is_file
+            (home / ".codex").mkdir(parents=True)
             codex_home.mkdir()
             project.mkdir()
+            (home / ".codex" / "config.toml").write_text(
+                'model = "ambient-user"\nmodel_reasoning_effort = "ultra"\n'
+            )
             (codex_home / "config.toml").write_text(
                 'model = "global"\nmodel_reasoning_effort = "ultra"\n'
             )
@@ -221,7 +256,15 @@ class ProfileInspectionTests(unittest.TestCase):
                 'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "medium"\n'
             )
 
-            result = inspect_profile(codex_home, "omnicodex-balanced", project)
+            with patch.object(Path, "home", return_value=home), patch.object(
+                Path,
+                "is_file",
+                autospec=True,
+                side_effect=lambda path: (
+                    False if path.resolve() == actual_user_config else real_is_file(path)
+                ),
+            ):
+                result = inspect_profile(codex_home, "omnicodex-balanced", project)
 
             self.assertEqual(result["resolved_model"], "gpt-5.6-sol")
             self.assertEqual(result["resolved_reasoning_effort"], "medium")
