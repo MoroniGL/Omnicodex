@@ -5,7 +5,6 @@ import hashlib
 import importlib.util
 import os
 import re
-import shutil
 import stat
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,8 @@ from urllib.parse import urlsplit
 MAX_OBJECTIVE_CHARS = 2000
 MAX_APPROVED_PATHS = 128
 MAX_FILES = 128
+MAX_DEPTH = 32
+MAX_DIRECTORY_ENTRIES = 4096
 MAX_FILE_BYTES = 262144
 MAX_TOTAL_BYTES = 524288
 MAX_ENDPOINT_CHARS = 2048
@@ -26,9 +27,9 @@ SENSITIVE_PARTS = {".git", ".ssh", ".aws", ".gnupg"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".kdbx", ".jks"}
 PRIVATE_KEY_MARKER = b"-----BEGIN "
 CREDENTIAL_ASSIGNMENT = re.compile(
-    rb"(?im)(?:^|[\s,{])(?:[A-Z][A-Z0-9_]*?(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH)|"
-    rb"password|passwd|token|secret|api[_-]?key|auth)\s*[:=]\s*[^\s#]+"
+    rb'''(?im)(?:^|[\s,{])['"]?([a-z_][a-z0-9_-]*)['"]?\s*[:=]\s*['"]?([^\s,}\r\n'"]+)'''
 )
+REDACTED_VALUES = {b"<redacted>", b"redacted", b"<secret>", b"changeme", b"example"}
 
 
 def require(condition: bool, message: str) -> None:
@@ -53,7 +54,12 @@ def _relative_path(value: Any) -> str:
     parts = value.split("/")
     require(all(part not in {"", ".", ".."} for part in parts), "Path traversal is forbidden")
     require(not any(part.casefold() in SENSITIVE_PARTS for part in parts), "Sensitive path forbidden")
-    require(not any(part.casefold().startswith(".env") for part in parts), "Sensitive path forbidden")
+    for part in parts:
+        lowered = part.casefold()
+        require(not lowered.startswith(".env"), "Sensitive path forbidden")
+        stem = lowered.rsplit(".", 1)[0]
+        require(not any(word in stem for word in ("credential", "password", "passwd", "private_key")),
+                "Sensitive path forbidden")
     return value
 
 
@@ -103,7 +109,18 @@ def validate_endpoint(endpoint: str) -> str:
 
 
 def _contains_sensitive_text(raw: bytes) -> bool:
-    return PRIVATE_KEY_MARKER in raw or CREDENTIAL_ASSIGNMENT.search(raw) is not None
+    if PRIVATE_KEY_MARKER in raw:
+        return True
+    for match in CREDENTIAL_ASSIGNMENT.finditer(raw):
+        key = match.group(1).lower()
+        if not any(word in key for word in
+                   (b"token", b"secret", b"password", b"passwd", b"api_key", b"apikey",
+                    b"auth", b"credential", b"access_key")):
+            continue
+        value = match.group(2).strip().lower()
+        if value not in REDACTED_VALUES and not value.startswith(b"${"):
+            return True
+    return False
 
 
 def _is_link_or_reparse(info: os.stat_result) -> bool:
@@ -126,24 +143,36 @@ def _validated_file(root: Path, relative: str) -> Path:
     return path
 
 
-def _walk_approved(root: Path, relative: str) -> list[str]:
-    _relative_path(relative)
-    path = root.joinpath(*relative.split("/"))
+def _read_verified_file(root: Path, relative: str) -> bytes:
+    """Read one regular file once, rejecting swaps, size growth, binary and secrets."""
+    path = _validated_file(root, relative)
+    before = path.lstat()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        info = path.lstat()
+        descriptor = os.open(path, flags)
     except OSError as error:
-        raise ValueError("Approved path is unavailable") from error
-    require(not _is_link_or_reparse(info), "Links and reparse points are forbidden")
-    if stat.S_ISREG(info.st_mode):
-        _validated_file(root, relative)
-        return [relative]
-    require(stat.S_ISDIR(info.st_mode), "Only regular files and directories are allowed")
-    found: list[str] = []
-    with os.scandir(path) as entries:
-        for entry in sorted(entries, key=lambda item: item.name):
-            child = relative + "/" + entry.name
-            found.extend(_walk_approved(root, child))
-    return found
+        raise ValueError("Approved file cannot be safely opened") from error
+    try:
+        opened = os.fstat(descriptor)
+        require(stat.S_ISREG(opened.st_mode) and not _is_link_or_reparse(opened) and
+                (before.st_dev, before.st_ino) == (opened.st_dev, opened.st_ino),
+                "Approved file changed while opening")
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := os.read(descriptor, 65536):
+            size += len(chunk)
+            require(size <= MAX_FILE_BYTES, "Approved file exceeds size limit")
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) ==
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+            "Approved file changed while reading")
+    raw = b"".join(chunks)
+    require(b"\x00" not in raw and not _contains_sensitive_text(raw),
+            "Approved file is binary or sensitive")
+    return raw
 
 
 def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
@@ -153,18 +182,40 @@ def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
             "Invalid approved path list")
     paths = [_relative_path(value) for value in approved_paths]
     require(len(paths) == len(set(paths)), "Duplicate approved path")
-    files = sorted({file for path in paths for file in _walk_approved(root, path)})
-    require(1 <= len(files) <= MAX_FILES, "Approved file count exceeds limit")
+    files: set[str] = set()
+    entries_seen = 0
+
+    def walk(relative: str, depth: int) -> None:
+        nonlocal entries_seen
+        require(depth <= MAX_DEPTH, "Approved path exceeds depth limit")
+        path = root.joinpath(*relative.split("/"))
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise ValueError("Approved path is unavailable") from error
+        require(not _is_link_or_reparse(info), "Links and reparse points are forbidden")
+        if stat.S_ISREG(info.st_mode):
+            _validated_file(root, relative)
+            files.add(relative)
+            require(len(files) <= MAX_FILES, "Approved file count exceeds limit")
+            return
+        require(stat.S_ISDIR(info.st_mode), "Only regular files and directories are allowed")
+        with os.scandir(path) as directory:
+            for entry in directory:
+                entries_seen += 1
+                require(entries_seen <= MAX_DIRECTORY_ENTRIES, "Approved traversal exceeds entry limit")
+                walk(relative + "/" + entry.name, depth + 1)
+
+    for path in paths:
+        walk(path, 0)
+    ordered = sorted(files)
+    require(ordered, "Approved scope is empty")
     total = 0
-    for relative in files:
-        path = _validated_file(root, relative)
-        with path.open("rb") as stream:
-            raw = stream.read(MAX_FILE_BYTES + 1)
-        require(len(raw) <= MAX_FILE_BYTES and b"\x00" not in raw and not _contains_sensitive_text(raw),
-                "Approved file is binary or sensitive")
+    for relative in ordered:
+        raw = _read_verified_file(root, relative)
         total += len(raw)
         require(total <= MAX_TOTAL_BYTES, "Approved aggregate exceeds size limit")
-    return files
+    return ordered
 
 
 def fingerprint_scope(root: Path, scope: list[str]) -> str:
@@ -174,17 +225,14 @@ def fingerprint_scope(root: Path, scope: list[str]) -> str:
     digest = hashlib.sha256()
     total = 0
     for relative in scope:
-        path = _validated_file(root, relative)
-        size = path.stat().st_size
-        total += size
+        raw = _read_verified_file(root, relative)
+        total += len(raw)
         require(total <= MAX_TOTAL_BYTES, "Approved aggregate exceeds size limit")
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(str(size).encode("ascii"))
+        digest.update(str(len(raw)).encode("ascii"))
         digest.update(b"\0")
-        with path.open("rb") as stream:
-            while chunk := stream.read(65536):
-                digest.update(chunk)
+        digest.update(raw)
     return digest.hexdigest()
 
 
@@ -194,13 +242,41 @@ def stage_scope(root: Path, scope: list[str], destination: Path,
     snapshot = fingerprint_scope(root, scope)
     if expected_snapshot is not None:
         require(snapshot == expected_snapshot, "Approved workspace snapshot changed")
-    require(isinstance(destination, Path), "Invalid staging destination")
-    destination.mkdir(parents=True, exist_ok=True)
+    require(isinstance(destination, Path) and destination.parent.is_dir(), "Invalid staging destination")
+    for parent in reversed(destination.parents):
+        try:
+            require(not _is_link_or_reparse(parent.lstat()), "Staging parent is a link")
+        except OSError as error:
+            raise ValueError("Staging parent is unavailable") from error
+    if destination.exists():
+        info = destination.lstat()
+        require(stat.S_ISDIR(info.st_mode) and not _is_link_or_reparse(info) and
+                not any(destination.iterdir()), "Staging destination must be a fresh empty directory")
+    else:
+        destination.mkdir()
+        require(not _is_link_or_reparse(destination.lstat()), "Staging destination is a link")
+    staged_digest = hashlib.sha256()
     for relative in scope:
-        source = _validated_file(root, relative)
+        raw = _read_verified_file(root, relative)
         target = destination.joinpath(*relative.split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
+        parent_info = target.parent.lstat()
+        require(stat.S_ISDIR(parent_info.st_mode) and not _is_link_or_reparse(parent_info),
+                "Staging destination contains a link")
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        except OSError as error:
+            raise ValueError("Staging target cannot be safely created") from error
+        try:
+            os.write(descriptor, raw)
+        finally:
+            os.close(descriptor)
+        staged_digest.update(relative.encode("utf-8"))
+        staged_digest.update(b"\0")
+        staged_digest.update(str(len(raw)).encode("ascii"))
+        staged_digest.update(b"\0")
+        staged_digest.update(raw)
+    require(staged_digest.hexdigest() == snapshot, "Approved workspace changed while staging")
     require(fingerprint_scope(root, scope) == snapshot, "Approved workspace changed while staging")
     return list(scope)
 
