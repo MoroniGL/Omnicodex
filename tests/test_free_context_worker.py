@@ -63,10 +63,19 @@ class FreeContextWorkerTests(unittest.TestCase):
 
     def test_request_rejects_path_traversal_and_windows_absolute_paths(self):
         for path in ("../secret", "/etc/passwd", "C:/Windows/win.ini", "C:\\Windows\\win.ini",
-                     "scripts\\efficiency.py"):
+                     "scripts\\efficiency.py", "safe/trailing.", "safe/trailing ",
+                     "safe/CON", "safe/nul.txt", "safe/bad:name.txt", "safe/bad?.txt"):
             with self.subTest(path=path):
                 with self.assertRaises(ValueError):
                     offload_scope.validate_worker_request(self.request(approved_paths=[path]))
+
+    def test_request_rejects_portable_path_aliases_and_prefix_conflicts(self):
+        for paths in (
+            ["safe/A.txt", "safe/a.txt"],
+            ["safe/a", "safe/a/b"],
+        ):
+            with self.subTest(paths=paths), self.assertRaises(ValueError):
+                offload_scope.validate_worker_request(self.request(approved_paths=paths))
 
     def test_endpoint_rejects_credentials_query_and_non_http_schemes(self):
         self.assertEqual(offload_scope.validate_endpoint("http://127.0.0.1:3001/v1"),
@@ -344,6 +353,35 @@ class FreeContextWorkerTests(unittest.TestCase):
 
             self.assertFalse(outside.exists())
             self.assertEqual(list(parent.iterdir()), [])
+
+    def test_staging_rejects_path_aliases_and_prefixes_before_creating_stage(self):
+        def entry(path):
+            data = b"safe\n"
+            return offload_scope.CapturedEntry(
+                path, data, hashlib.sha256(data).hexdigest()
+            )
+
+        cases = {
+            "file ancestor prefix": (entry("safe/a"), entry("safe/a/b")),
+            "case insensitive collision": (entry("safe/A.txt"), entry("safe/a.txt")),
+            "trailing dot": (entry("safe/name."),),
+            "trailing space": (entry("safe/name "),),
+            "reserved device": (entry("safe/CON"),),
+            "reserved device with suffix": (entry("safe/nul.txt"),),
+            "invalid Windows character": (entry("safe/bad:name.txt"),),
+        }
+
+        for name, entries in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as staging:
+                parent = Path(staging)
+                forged = offload_scope.CapturedScope(
+                    entries, offload_scope._fingerprint_entries(entries)
+                )
+
+                with self.assertRaises(ValueError):
+                    offload_scope.stage_captured_scope(forged, parent)
+
+                self.assertEqual(list(parent.iterdir()), [])
 
     def test_staging_rejects_forged_entry_invariants_before_creating_stage(self):
         def entry(path, data=b"safe\n", digest=None):

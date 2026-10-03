@@ -30,6 +30,12 @@ CREDENTIAL_ASSIGNMENT = re.compile(
     rb'''(?im)(?:^|[\s,{])['"]?([a-z_][a-z0-9_-]*)['"]?\s*[:=]\s*['"]?([^\s,}\r\n'"]+)'''
 )
 REDACTED_VALUES = {b"<redacted>", b"redacted", b"<secret>", b"changeme", b"example"}
+WINDOWS_INVALID_FILENAME_CHARS = frozenset('<>:"|?*')
+WINDOWS_RESERVED_STEMS = {
+    "con", "prn", "aux", "nul", "conin$", "conout$",
+    *(f"com{suffix}" for suffix in "123456789¹²³"),
+    *(f"lpt{suffix}" for suffix in "123456789¹²³"),
+}
 
 
 @dataclass(frozen=True)
@@ -59,7 +65,7 @@ def _efficiency_module() -> Any:
     return module
 
 
-def _relative_path(value: Any) -> str:
+def _relative_path_components(value: Any) -> tuple[str, ...]:
     require(isinstance(value, str) and 0 < len(value) <= 4096 and "\x00" not in value,
             "Invalid approved path")
     require("\\" not in value and not value.startswith("/"), "Path must be repo-relative")
@@ -69,13 +75,39 @@ def _relative_path(value: Any) -> str:
     require(not any(part.casefold() in SENSITIVE_PARTS for part in parts), "Sensitive path forbidden")
     for part in parts:
         lowered = part.casefold()
+        require(not part.endswith((".", " ")) and
+                not any(ord(character) < 32 or character in WINDOWS_INVALID_FILENAME_CHARS
+                        for character in part),
+                "Non-portable path component")
+        require(lowered.split(".", 1)[0] not in WINDOWS_RESERVED_STEMS,
+                "Reserved path component")
         require(not lowered.startswith(".env"), "Sensitive path forbidden")
         stem = lowered.rsplit(".", 1)[0]
         require(stem not in {"private-key", "private_key", "auth", "token", "secret", "api-key",
                              "api_key", "apikey"} and
                 not any(word in stem for word in ("credential", "password", "passwd")),
                 "Sensitive path forbidden")
+    return tuple(part.casefold() for part in parts)
+
+
+def _relative_path(value: Any) -> str:
+    _relative_path_components(value)
     return value
+
+
+def _relative_path_set(values: list[Any]) -> list[str]:
+    """Validate paths and reject aliases or file/ancestor conflicts as a complete set."""
+    paths: list[str] = []
+    normalized: list[tuple[str, ...]] = []
+    for value in values:
+        normalized.append(_relative_path_components(value))
+        paths.append(value)
+    ordered = sorted(normalized)
+    require(len(ordered) == len(set(ordered)), "Duplicate or aliased path")
+    for parent, child in zip(ordered, ordered[1:]):
+        require(not (len(parent) < len(child) and child[:len(parent)] == parent),
+                "Path cannot also be an ancestor")
+    return paths
 
 
 def validate_worker_request(request: dict[str, Any]) -> None:
@@ -92,8 +124,7 @@ def validate_worker_request(request: dict[str, Any]) -> None:
     paths = request.get("approved_paths")
     require(isinstance(paths, list) and 1 <= len(paths) <= MAX_APPROVED_PATHS,
             "Invalid approved path list")
-    normal_paths = [_relative_path(path) for path in paths]
-    require(len(set(normal_paths)) == len(normal_paths), "Duplicate approved path")
+    _relative_path_set(paths)
     classification = request.get("data_classification")
     require(classification in {"public", "approved_private"}, "Sensitive data cannot be offloaded")
     require(request.get("external_offload_approved") is True,
@@ -229,8 +260,7 @@ def _collect_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
     require(isinstance(root, Path) and root.is_dir(), "Workspace root is unavailable")
     require(isinstance(approved_paths, list) and 1 <= len(approved_paths) <= MAX_APPROVED_PATHS,
             "Invalid approved path list")
-    paths = [_relative_path(value) for value in approved_paths]
-    require(len(paths) == len(set(paths)), "Duplicate approved path")
+    paths = _relative_path_set(approved_paths)
     files: set[str] = set()
     entries_seen = 0
 
@@ -260,6 +290,7 @@ def _collect_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
         walk(path, 0)
     ordered = sorted(files)
     require(ordered, "Approved scope is empty")
+    _relative_path_set(ordered)
     return ordered
 
 
@@ -304,8 +335,8 @@ def _validate_captured_scope(captured: Any) -> None:
                 "Captured entry digest mismatch")
         paths.append(path)
 
-    require(paths == sorted(paths) and len(paths) == len(set(paths)),
-            "Captured paths must be unique and sorted")
+    _relative_path_set(paths)
+    require(paths == sorted(paths), "Captured paths must be sorted")
     require(captured.fingerprint == _fingerprint_entries(captured.entries),
             "Captured scope fingerprint mismatch")
 
