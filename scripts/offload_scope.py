@@ -58,7 +58,8 @@ def _relative_path(value: Any) -> str:
         lowered = part.casefold()
         require(not lowered.startswith(".env"), "Sensitive path forbidden")
         stem = lowered.rsplit(".", 1)[0]
-        require(not any(word in stem for word in ("credential", "password", "passwd", "private_key")),
+        require(stem not in {"private-key", "private_key", "auth", "token", "secret"} and
+                not any(word in stem for word in ("credential", "password", "passwd")),
                 "Sensitive path forbidden")
     return value
 
@@ -114,7 +115,7 @@ def _contains_sensitive_text(raw: bytes) -> bool:
     for match in CREDENTIAL_ASSIGNMENT.finditer(raw):
         key = match.group(1).lower()
         if not any(word in key for word in
-                   (b"token", b"secret", b"password", b"passwd", b"api_key", b"apikey",
+                   (b"token", b"secret", b"password", b"passwd", b"api_key", b"api-key", b"apikey",
                     b"auth", b"credential", b"access_key")):
             continue
         value = match.group(2).strip().lower()
@@ -129,9 +130,41 @@ def _is_link_or_reparse(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(reparse and attributes & reparse)
 
 
+def _workspace_root(root: Path) -> Path:
+    try:
+        resolved = root.resolve(strict=True)
+        info = root.lstat()
+    except OSError as error:
+        raise ValueError("Workspace root is unavailable") from error
+    require(stat.S_ISDIR(info.st_mode) and not _is_link_or_reparse(info), "Workspace root is unsafe")
+    return resolved
+
+
+def _safe_workspace_path(root: Path, relative: str) -> Path:
+    """Resolve every existing relative ancestor beneath a non-link workspace root."""
+    relative = _relative_path(relative)
+    resolved_root = _workspace_root(root)
+    current = root
+    for part in relative.split("/"):
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise ValueError("Approved path is unavailable") from error
+        require(not _is_link_or_reparse(info), "Links and reparse points are forbidden")
+        if part != relative.split("/")[-1]:
+            require(stat.S_ISDIR(info.st_mode), "Approved ancestor is not a directory")
+    try:
+        resolved = current.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError) as error:
+        raise ValueError("Approved path escaped workspace") from error
+    return current
+
+
 def _validated_file(root: Path, relative: str) -> Path:
     _relative_path(relative)
-    path = root.joinpath(*relative.split("/"))
+    path = _safe_workspace_path(root, relative)
     try:
         info = path.lstat()
     except OSError as error:
@@ -143,8 +176,9 @@ def _validated_file(root: Path, relative: str) -> Path:
     return path
 
 
-def _read_verified_file(root: Path, relative: str) -> bytes:
+def _read_verified_file(root: Path, relative: str, limit: int = MAX_FILE_BYTES) -> bytes:
     """Read one regular file once, rejecting swaps, size growth, binary and secrets."""
+    require(0 <= limit <= MAX_FILE_BYTES, "Invalid read limit")
     path = _validated_file(root, relative)
     before = path.lstat()
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -159,13 +193,14 @@ def _read_verified_file(root: Path, relative: str) -> bytes:
                 "Approved file changed while opening")
         chunks: list[bytes] = []
         size = 0
-        while chunk := os.read(descriptor, 65536):
+        while chunk := os.read(descriptor, min(65536, limit - size + 1)):
             size += len(chunk)
-            require(size <= MAX_FILE_BYTES, "Approved file exceeds size limit")
+            require(size <= limit, "Approved file exceeds size limit")
             chunks.append(chunk)
     finally:
         os.close(descriptor)
-    after = path.lstat()
+    after_path = _safe_workspace_path(root, relative)
+    after = after_path.lstat()
     require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) ==
             (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
             "Approved file changed while reading")
@@ -188,7 +223,8 @@ def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
     def walk(relative: str, depth: int) -> None:
         nonlocal entries_seen
         require(depth <= MAX_DEPTH, "Approved path exceeds depth limit")
-        path = root.joinpath(*relative.split("/"))
+        _relative_path(relative)
+        path = _safe_workspace_path(root, relative)
         try:
             info = path.lstat()
         except OSError as error:
@@ -212,7 +248,7 @@ def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
     require(ordered, "Approved scope is empty")
     total = 0
     for relative in ordered:
-        raw = _read_verified_file(root, relative)
+        raw = _read_verified_file(root, relative, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
         total += len(raw)
         require(total <= MAX_TOTAL_BYTES, "Approved aggregate exceeds size limit")
     return ordered
@@ -225,7 +261,7 @@ def fingerprint_scope(root: Path, scope: list[str]) -> str:
     digest = hashlib.sha256()
     total = 0
     for relative in scope:
-        raw = _read_verified_file(root, relative)
+        raw = _read_verified_file(root, relative, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
         total += len(raw)
         require(total <= MAX_TOTAL_BYTES, "Approved aggregate exceeds size limit")
         digest.update(relative.encode("utf-8"))
@@ -242,24 +278,37 @@ def stage_scope(root: Path, scope: list[str], destination: Path,
     snapshot = fingerprint_scope(root, scope)
     if expected_snapshot is not None:
         require(snapshot == expected_snapshot, "Approved workspace snapshot changed")
-    require(isinstance(destination, Path) and destination.parent.is_dir(), "Invalid staging destination")
+    require(isinstance(destination, Path) and destination.parent.is_dir() and not destination.exists(),
+            "Staging destination must be newly created")
     for parent in reversed(destination.parents):
         try:
             require(not _is_link_or_reparse(parent.lstat()), "Staging parent is a link")
         except OSError as error:
             raise ValueError("Staging parent is unavailable") from error
-    if destination.exists():
-        info = destination.lstat()
-        require(stat.S_ISDIR(info.st_mode) and not _is_link_or_reparse(info) and
-                not any(destination.iterdir()), "Staging destination must be a fresh empty directory")
-    else:
-        destination.mkdir()
-        require(not _is_link_or_reparse(destination.lstat()), "Staging destination is a link")
+    try:
+        os.mkdir(destination)
+    except OSError as error:
+        raise ValueError("Staging destination cannot be created") from error
+    info = destination.lstat()
+    require(stat.S_ISDIR(info.st_mode) and not _is_link_or_reparse(info), "Staging destination is a link")
     staged_digest = hashlib.sha256()
+    created_dirs: set[Path] = set()
+    staged_total = 0
     for relative in scope:
-        raw = _read_verified_file(root, relative)
+        raw = _read_verified_file(root, relative, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - staged_total))
+        staged_total += len(raw)
         target = destination.joinpath(*relative.split("/"))
-        target.parent.mkdir(parents=True, exist_ok=True)
+        parent = destination
+        for component in relative.split("/")[:-1]:
+            parent = parent / component
+            if parent.exists():
+                require(parent in created_dirs, "Staging destination component already exists")
+            else:
+                try:
+                    os.mkdir(parent)
+                except OSError as error:
+                    raise ValueError("Staging destination component cannot be created") from error
+                created_dirs.add(parent)
         parent_info = target.parent.lstat()
         require(stat.S_ISDIR(parent_info.st_mode) and not _is_link_or_reparse(parent_info),
                 "Staging destination contains a link")
@@ -268,7 +317,12 @@ def stage_scope(root: Path, scope: list[str], destination: Path,
         except OSError as error:
             raise ValueError("Staging target cannot be safely created") from error
         try:
-            os.write(descriptor, raw)
+            written = 0
+            while written < len(raw):
+                count = os.write(descriptor, raw[written:])
+                require(count > 0, "Staging write failed")
+                written += count
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
         staged_digest.update(relative.encode("utf-8"))
@@ -278,6 +332,7 @@ def stage_scope(root: Path, scope: list[str], destination: Path,
         staged_digest.update(raw)
     require(staged_digest.hexdigest() == snapshot, "Approved workspace changed while staging")
     require(fingerprint_scope(root, scope) == snapshot, "Approved workspace changed while staging")
+    require(fingerprint_scope(destination, scope) == snapshot, "Staged files do not match approved snapshot")
     return list(scope)
 
 

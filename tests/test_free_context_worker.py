@@ -3,6 +3,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,6 +106,7 @@ class FreeContextWorkerTests(unittest.TestCase):
                              ["safe/placeholder.txt"])
             for name, content in (
                 ("api.txt", '"api_key": "live-secret-value"\n'),
+                ("hyphen.txt", "api-key=live-secret-value\n"),
                 ("aws.txt", "aws_access_key_id=AKIAIOSFODNN7EXAMPLE\n"),
                 ("token.txt", "_authToken=live-token-value\n"),
                 ("credentials.txt", "ordinary text\n"),
@@ -114,6 +116,18 @@ class FreeContextWorkerTests(unittest.TestCase):
                 with self.subTest(name=name):
                     with self.assertRaises(ValueError):
                         offload_scope.expand_approved_scope(root, [f"safe/{name}"])
+
+    def test_expand_scope_rejects_exact_sensitive_stems_but_allows_token_offload_docs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe").mkdir()
+            (root / "safe" / "token-offload.md").write_text("ordinary documentation\n", encoding="utf-8")
+            self.assertEqual(offload_scope.expand_approved_scope(root, ["safe/token-offload.md"]),
+                             ["safe/token-offload.md"])
+            for name in ("private-key.txt", "auth.json", "token.md", "secret.txt"):
+                (root / "safe" / name).write_text("ordinary text\n", encoding="utf-8")
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    offload_scope.expand_approved_scope(root, [f"safe/{name}"])
 
     def test_expand_scope_is_bounded_and_snapshot_changes_with_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -157,24 +171,54 @@ class FreeContextWorkerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 offload_scope.expand_approved_scope(root, ["deep"])
 
+    def test_expand_scope_enforces_directory_entry_limit_incrementally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe").mkdir()
+            for index in range(3):
+                (root / "safe" / f"{index}.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(offload_scope, "MAX_DIRECTORY_ENTRIES", 2):
+                with self.assertRaises(ValueError):
+                    offload_scope.expand_approved_scope(root, ["safe"])
+
+    def test_read_limit_uses_only_one_sentinel_byte_beyond_remaining_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe").mkdir()
+            (root / "safe" / "file.txt").write_bytes(b"abcdef")
+            requests = []
+            real_read = offload_scope.os.read
+
+            def bounded_read(descriptor, count):
+                requests.append(count)
+                return real_read(descriptor, count)
+
+            with mock.patch.object(offload_scope.os, "read", side_effect=bounded_read):
+                with self.assertRaises(ValueError):
+                    offload_scope._read_verified_file(root, "safe/file.txt", 3)
+            self.assertTrue(requests)
+            self.assertLessEqual(max(requests), 4)
+
     def test_staging_preserves_relative_names_and_refuses_changed_snapshot(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
             root = Path(directory)
+            destination = Path(staging) / "view"
             (root / "safe").mkdir()
             path = root / "safe" / "ok.txt"
             path.write_text("safe text\n", encoding="utf-8")
             scope = offload_scope.expand_approved_scope(root, ["safe"])
             snapshot = offload_scope.fingerprint_scope(root, scope)
-            staged = offload_scope.stage_scope(root, scope, Path(staging), snapshot)
+            staged = offload_scope.stage_scope(root, scope, destination, snapshot)
             self.assertEqual(staged, ["safe/ok.txt"])
-            self.assertEqual((Path(staging) / "safe" / "ok.txt").read_text(encoding="utf-8"), "safe text\n")
+            self.assertEqual((destination / "safe" / "ok.txt").read_text(encoding="utf-8"), "safe text\n")
             path.write_text("changed\n", encoding="utf-8")
             with self.assertRaises(ValueError):
-                offload_scope.stage_scope(root, scope, Path(staging), snapshot)
+                offload_scope.stage_scope(root, scope, destination, snapshot)
 
     def test_staging_rejects_mutation_to_sensitive_content_and_matches_snapshot(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
             root = Path(directory)
+            destination = Path(staging) / "view"
             (root / "safe").mkdir()
             source = root / "safe" / "ok.txt"
             source.write_text("safe\n", encoding="utf-8")
@@ -182,11 +226,11 @@ class FreeContextWorkerTests(unittest.TestCase):
             snapshot = offload_scope.fingerprint_scope(root, scope)
             source.write_text('"api_key": "live-secret-value"\n', encoding="utf-8")
             with self.assertRaises(ValueError):
-                offload_scope.stage_scope(root, scope, Path(staging), snapshot)
+                offload_scope.stage_scope(root, scope, destination, snapshot)
             source.write_text("safe again\n", encoding="utf-8")
             snapshot = offload_scope.fingerprint_scope(root, scope)
-            offload_scope.stage_scope(root, scope, Path(staging), snapshot)
-            self.assertEqual(offload_scope.fingerprint_scope(Path(staging), scope), snapshot)
+            offload_scope.stage_scope(root, scope, destination, snapshot)
+            self.assertEqual(offload_scope.fingerprint_scope(destination, scope), snapshot)
 
     def test_staging_rejects_destination_symlink_escape(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging, \
@@ -202,6 +246,40 @@ class FreeContextWorkerTests(unittest.TestCase):
                 self.skipTest("Host does not allow creating symlinks")
             with self.assertRaises(ValueError):
                 offload_scope.stage_scope(root, scope, destination)
+
+    def test_staging_requires_a_nonexisting_destination_and_writes_all_partial_chunks(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
+            root = Path(directory)
+            destination = Path(staging) / "view"
+            (root / "safe").mkdir()
+            source = root / "safe" / "ok.txt"
+            source.write_text("all staged bytes\n", encoding="utf-8")
+            scope = offload_scope.expand_approved_scope(root, ["safe"])
+            destination.mkdir()
+            with self.assertRaises(ValueError):
+                offload_scope.stage_scope(root, scope, destination)
+            destination.rmdir()
+            real_write = offload_scope.os.write
+
+            def partial_write(descriptor, data):
+                return real_write(descriptor, data[:1])
+
+            with mock.patch.object(offload_scope.os, "write", side_effect=partial_write):
+                offload_scope.stage_scope(root, scope, destination)
+            self.assertEqual((destination / "safe" / "ok.txt").read_text(encoding="utf-8"),
+                             "all staged bytes\n")
+
+    def test_staging_rejects_swapped_source_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
+            root = Path(directory)
+            (root / "safe").mkdir()
+            (root / "safe" / "ok.txt").write_text("safe\n", encoding="utf-8")
+            scope = offload_scope.expand_approved_scope(root, ["safe"])
+            destination = Path(staging) / "view"
+            with mock.patch.object(offload_scope, "_safe_workspace_path",
+                                   side_effect=ValueError("ancestor changed")):
+                with self.assertRaises(ValueError):
+                    offload_scope.stage_scope(root, scope, destination)
 
     def test_evidence_references_must_point_inside_original_scope_and_real_lines(self):
         with tempfile.TemporaryDirectory() as directory:
