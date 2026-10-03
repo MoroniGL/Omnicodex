@@ -11,13 +11,14 @@ import json
 import os
 import re
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from scripts import efficiency, offload_scope
-from .base import GenerationResult, ProviderError
+from .base import GenerationResult, ProviderError, safe_diagnostics
 
 
 API_URL_PREFIX = "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -182,8 +183,15 @@ class HttpTransport:
             raise
         except (socket.timeout, TimeoutError):
             raise ProviderError("provider_timeout") from None
+        except (ssl.SSLError, socket.gaierror, ConnectionError, http.client.HTTPException, UnicodeError) as error:
+            category = ("tls_error" if isinstance(error, ssl.SSLError) else
+                        "dns_error" if isinstance(error, socket.gaierror) else
+                        "connection_error" if isinstance(error, ConnectionError) else
+                        "http_protocol_error" if isinstance(error, http.client.HTTPException) else
+                        "request_encoding_error")
+            raise ProviderError("provider_failed", {"transport_error": category}) from None
         except Exception:
-            raise ProviderError("provider_failed") from None
+            raise ProviderError("provider_failed", {"transport_error": "transport_error"}) from None
         finally:
             if connection is not None:
                 try:
@@ -329,7 +337,7 @@ class GeminiProvider:
             if isinstance(result, tuple) and len(result) == 3:
                 return TransportResponse(result[0], result[1], result[2])
         except ProviderError as exc:
-            raise ProviderError(exc.reason_code) from None
+            raise ProviderError(exc.reason_code, safe_diagnostics(exc.telemetry)) from None
         except TimeoutError:
             raise ProviderError("provider_timeout") from None
         except Exception:
@@ -337,9 +345,29 @@ class GeminiProvider:
         raise ProviderError("provider_failed")
 
     @staticmethod
+    def _http_diagnostics(response: TransportResponse, limit: int) -> dict[str, Any]:
+        diagnostics = safe_diagnostics({"provider_http_status": response.status})
+        try:
+            payload = efficiency.parse_bounded_json(response.body, limit=limit)
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if not isinstance(error, dict):
+                return diagnostics
+            diagnostics.update(safe_diagnostics({"provider_error_status": error.get("status")}))
+            details = error.get("details", [])
+            for detail in details if isinstance(details, list) else []:
+                if isinstance(detail, dict):
+                    codes = safe_diagnostics({"provider_error_reason": detail.get("reason")})
+                    if codes:
+                        diagnostics.update(codes)
+                        break
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            pass
+        return diagnostics
+
+    @staticmethod
     def _parse(response: TransportResponse, limit: int, secret: str) -> tuple[dict[str, Any], str | None, dict[str, int]]:
         if type(response.status) is not int or response.status < 200 or response.status >= 300:
-            raise ProviderError("provider_failed")
+            raise ProviderError("provider_failed", GeminiProvider._http_diagnostics(response, limit))
         if not isinstance(response.body, bytes) or len(response.body) > limit:
             raise ProviderError("invalid_pack")
         if secret.encode("utf-8") in response.body:
@@ -413,6 +441,8 @@ class GeminiProvider:
             return GenerationResult(pack, telemetry)
         except ProviderError as exc:
             telemetry.update(_safe_usage(exc.telemetry))
+            telemetry.update({field: value for field, value in safe_diagnostics(exc.telemetry).items()
+                              if not isinstance(value, str) or not key or key not in value})
             telemetry["elapsed_ms"] = max(0, int((self._clock() - started) * 1000))
             raise ProviderError(exc.reason_code, telemetry) from None
 

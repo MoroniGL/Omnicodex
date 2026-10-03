@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts import efficiency, free_context_worker as worker, offload_scope as scope
 from scripts.providers.gemini import GeminiProvider
-from scripts.providers.base import ProviderError
+from scripts.providers.base import ProviderError, safe_diagnostics
 
 MARKER = b"OMNICODEX_ACCEPTANCE_MARKER: deterministic synthetic public evidence\n"
 RAW_ACCEPTANCE_BYTES = 180000  # 45k under the shipped 4-byte routing estimator.
@@ -141,6 +141,7 @@ def run_validation(*, environment: Mapping[str, str] | None = None, transport: A
             report["status"] = "accepted"
     except ProviderError as error:
         report.update(status="failed", reason_code=error.reason_code, native_fallback_recommended=True)
+        report["provider_diagnostics"] = safe_diagnostics(error.telemetry)
         return report, 3
     except (OSError, ValueError, TypeError, AttributeError, KeyError, UnicodeError, RecursionError):
         report.update(status="failed", reason_code="acceptance_validation_failed", native_fallback_recommended=True)

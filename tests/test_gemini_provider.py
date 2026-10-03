@@ -381,6 +381,66 @@ class GeminiProviderTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaisesRegex(ProviderError, "provider_failed"):
                 self.provider(RecordingTransport(TransportResponse(status, {"Location": "https://other.test"}, b"{}"))).generate_evidence_pack(task(), scope(), schema(), limits())
 
+    def test_http_failure_preserves_codes_but_never_messages_or_metadata(self):
+        raw = json.dumps({"error": {"status": "INVALID_ARGUMENT", "message": SECRET,
+            "details": [{"reason": "API_KEY_INVALID", "metadata": {"key": SECRET}}]}}).encode()
+        with self.assertRaises(ProviderError) as raised:
+            self.provider(RecordingTransport(TransportResponse(400, {}, raw))).generate_evidence_pack(
+                task(), scope(), schema(), limits())
+        telemetry = raised.exception.telemetry
+        self.assertEqual(telemetry["provider_http_status"], 400)
+        self.assertEqual(telemetry["provider_error_status"], "INVALID_ARGUMENT")
+        self.assertEqual(telemetry["provider_error_reason"], "API_KEY_INVALID")
+        self.assertNotIn(SECRET, json.dumps(telemetry))
+
+    def test_http_diagnostics_ignore_untrusted_values_and_malformed_bodies(self):
+        bodies = [b"not json", b"[1]", json.dumps({"error": {"status": SECRET,
+            "details": [{"reason": SECRET}]}}).encode(),
+            b'{"error":{"status":"INTERNAL","status":"UNAVAILABLE"}}']
+        for raw in bodies:
+            with self.subTest(raw=raw), self.assertRaises(ProviderError) as raised:
+                self.provider(RecordingTransport(TransportResponse(503, {}, raw))).generate_evidence_pack(
+                    task(), scope(), schema(), limits())
+            self.assertEqual(raised.exception.telemetry["provider_http_status"], 503)
+            self.assertNotIn("provider_error_status", raised.exception.telemetry)
+            self.assertNotIn("provider_error_reason", raised.exception.telemetry)
+            self.assertNotIn(SECRET, json.dumps(raised.exception.telemetry))
+
+    def test_transport_diagnostics_classify_without_exception_text(self):
+        import socket
+        import ssl
+        cases = ((ssl.SSLError(SECRET), "tls_error"),
+                 (socket.gaierror(SECRET), "dns_error"),
+                 (ConnectionError(SECRET), "connection_error"))
+        for error, expected in cases:
+            connection = FakeHttpConnection(FakeHttpResponse([]))
+            def fail(*args, **kwargs):
+                raise error
+            connection.request = fail
+            transport = HttpTransport(connection_factory=lambda *args, **kwargs: connection)
+            with self.subTest(expected=expected), self.assertRaises(ProviderError) as raised:
+                self.provider(transport).generate_evidence_pack(task(), scope(), schema(), limits())
+            self.assertEqual(raised.exception.telemetry["transport_error"], expected)
+            self.assertNotIn(SECRET, json.dumps(raised.exception.telemetry))
+
+    def test_diagnostic_code_matching_key_is_omitted(self):
+        key = "INVALID_ARGUMENT"
+        raw = json.dumps({"error": {"status": key}}).encode()
+        provider = GeminiProvider(environment={"GEMINI_API_KEY": key},
+            transport=RecordingTransport(TransportResponse(400, {}, raw)))
+        with self.assertRaises(ProviderError) as raised:
+            provider.generate_evidence_pack(task(), scope(), schema(), limits())
+        self.assertNotIn(key, json.dumps(raised.exception.telemetry))
+
+    def test_untrusted_transport_diagnostic_values_are_omitted(self):
+        transport = RecordingTransport(ProviderError("provider_failed", {
+            "provider_http_status": True, "provider_error_status": [SECRET],
+            "provider_error_reason": {"secret": SECRET}, "transport_error": SECRET}))
+        with self.assertRaises(ProviderError) as raised:
+            self.provider(transport).generate_evidence_pack(task(), scope(), schema(), limits())
+        self.assertFalse(any(field in raised.exception.telemetry for field in (
+            "provider_http_status", "provider_error_status", "provider_error_reason", "transport_error")))
+
     def test_response_size_timeout_and_limits_are_bounded(self):
         oversized = b"x" * 32
         with self.assertRaisesRegex(ProviderError, "invalid_pack"):

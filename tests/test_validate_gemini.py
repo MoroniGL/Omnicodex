@@ -84,6 +84,18 @@ class LiveValidationTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertFalse(report["connectivity_verified"])
 
+    def test_probe_failure_reports_only_safe_provider_diagnostics(self):
+        body = json.dumps({"error": {"status": "RESOURCE_EXHAUSTED",
+            "message": "unsafe acceptance-key", "details": [{"reason": "QUOTA_EXCEEDED"}]}}).encode()
+        report, code = validate_gemini.run_validation(
+            environment={"GEMINI_API_KEY": "acceptance-key"}, transport=lambda *args: (429, {}, body))
+        self.assertEqual(code, 3)
+        self.assertEqual(report["provider_diagnostics"], {
+            "provider_http_status": 429, "provider_error_status": "RESOURCE_EXHAUSTED",
+            "provider_error_reason": "QUOTA_EXCEEDED"})
+        self.assertFalse(report["connectivity_verified"])
+        self.assertNotIn("acceptance-key", json.dumps(report))
+
     def test_each_existing_profile_keeps_its_cost_gate_in_acceptance(self):
         for profile in ("economy", "balanced", "quality", "max", "auto"):
             with self.subTest(profile=profile):

@@ -5,6 +5,32 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
 
+_DIAGNOSTIC_CODES = {
+    "provider_error_status": frozenset(("INVALID_ARGUMENT", "FAILED_PRECONDITION",
+        "UNAUTHENTICATED", "PERMISSION_DENIED", "NOT_FOUND", "RESOURCE_EXHAUSTED",
+        "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED")),
+    "provider_error_reason": frozenset(("API_KEY_INVALID", "API_KEY_EXPIRED",
+        "API_KEY_SERVICE_BLOCKED", "API_KEY_HTTP_REFERRER_BLOCKED", "API_KEY_IP_ADDRESS_BLOCKED",
+        "SERVICE_DISABLED", "CONSUMER_INVALID", "BILLING_DISABLED", "RATE_LIMIT_EXCEEDED",
+        "QUOTA_EXCEEDED")),
+    "transport_error": frozenset(("tls_error", "dns_error", "connection_error",
+        "http_protocol_error", "request_encoding_error", "transport_error")),
+}
+
+
+def safe_diagnostics(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain a numeric HTTP status and fixed codes; never arbitrary provider text."""
+    result: dict[str, Any] = {}
+    status = value.get("provider_http_status")
+    if type(status) is int and 100 <= status <= 599:
+        result["provider_http_status"] = status
+    for field, allowed in _DIAGNOSTIC_CODES.items():
+        item = value.get(field)
+        if isinstance(item, str) and item in allowed:
+            result[field] = item
+    return result
+
+
 @dataclass(frozen=True)
 class GenerationResult:
     """A validated provider response and only directly evidenced telemetry."""

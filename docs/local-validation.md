@@ -122,6 +122,12 @@ when Gemini returns usage metadata. The command may incur API billing; a model
 name does not guarantee that the account has a free tier. The test uses only its
 synthetic approved workspace and never reads unapproved files.
 
+On probe failure, `provider_diagnostics` reports the HTTP status and recognized
+API status/reason codes, or a fixed transport category such as `tls_error` or
+`dns_error`. It never includes raw response messages, headers, error metadata,
+exception text, or the key. Unknown diagnostic codes are omitted. Configuration
+READY still does not mean connectivity has been verified.
+
 For manual investigation, create a disposable workspace and request outside it:
 
 ```powershell
