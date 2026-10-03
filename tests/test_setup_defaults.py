@@ -29,8 +29,7 @@ class SetupDefaultsTests(unittest.TestCase):
         for i in range(7):
             (self.repo / f"agents/role-{i}.toml").write_text('model = "fixture-worker"\n')
         (self.repo / "skills/omnicodex/SKILL.md").write_text('---\nname: omnicodex\n---\nPolicy\n')
-        for name in ("efficiency", "jev"):
-            (self.repo / f"skills/omnicodex/references/{name}.md").write_text("Optional reference\n")
+        (self.repo / "skills/omnicodex/references/efficiency.md").write_text("Optional reference\n")
         (self.home / "config.toml").write_text('model = "original"\n')
 
     def run_setup(self, **kwargs):
@@ -39,7 +38,7 @@ class SetupDefaultsTests(unittest.TestCase):
     def test_preview_has_no_writes(self):
         result = self.run_setup()
         self.assertEqual(result["mode"], "preview")
-        self.assertEqual(result["assets"], 14)
+        self.assertEqual(result["assets"], 13)
         self.assertFalse((self.home / "omnicodex").exists())
         self.assertFalse(self.skills.exists())
 
@@ -47,10 +46,10 @@ class SetupDefaultsTests(unittest.TestCase):
         result = self.run_setup(apply=True)
         self.assertEqual(result["preferences"]["profile"], "auto")
         self.assertEqual((self.home / "config.toml").read_text(), 'model = "original"\n')
-        self.assertTrue((self.skills / "omnicodex/references/jev.md").exists())
+        self.assertTrue((self.skills / "omnicodex/references/efficiency.md").exists())
         self.assertTrue(d.status(self.home)["managed_block_intact"])
         manifest = json.loads((self.home / "omnicodex/install-manifest.json").read_text())
-        self.assertEqual(len(manifest["files"]), 14)
+        self.assertEqual(len(manifest["files"]), 13)
 
     def test_setup_update_preserves_selection(self):
         self.run_setup(apply=True, profile="quality")
