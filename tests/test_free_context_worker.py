@@ -1,9 +1,11 @@
 """Safety contract tests for bounded FreeLLMAPI worker inputs."""
 import hashlib
+import io
 import importlib.util
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -575,14 +577,20 @@ class CodexExecAdapterTests(unittest.TestCase):
     def fake_prefix(self, directory):
         fake = Path(directory) / "fake_codex.py"
         fake.write_text(
-            "import json, os, pathlib, sys, time\n"
+            "import json, os, pathlib, subprocess, sys, time\n"
             "args = sys.argv[1:]\n"
             "mode = os.environ.get('FAKE_CODEX_MODE', 'success')\n"
             "if mode == 'no_read': time.sleep(5); sys.exit(0)\n"
             "prompt = sys.stdin.read()\n"
+            "if mode == 'descendant': subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'], stdout=sys.stdout, stderr=sys.stderr); sys.exit(0)\n"
             "if mode == 'timeout': time.sleep(5)\n"
             "if mode == 'malformed': print('{not json}')\n"
             "elif mode == 'leak_stdout': print(os.environ['FREELLMAPI_API_KEY'])\n"
+            "elif mode == 'leak_stderr': print(os.environ['FREELLMAPI_API_KEY'], file=sys.stderr)\n"
+            "elif mode == 'leak_split':\n"
+            "    secret = os.environ['FREELLMAPI_API_KEY'].encode()\n"
+            "    sys.stdout.buffer.write(secret[:len(secret) // 2]); sys.stdout.buffer.flush(); time.sleep(0.02)\n"
+            "    sys.stdout.buffer.write(secret[len(secret) // 2:] + b'\\n')\n"
             "else: print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 12, 'cached_input_tokens': 3, 'output_tokens': 4, 'reasoning_output_tokens': 2}, 'model': 'served-model', 'provider': 'served-provider', 'retry_count': 1, 'fallback_count': 0}))\n"
             "if mode == 'nonzero': sys.exit(7)\n"
             "if mode != 'missing': pathlib.Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps({'status': 'completed', 'summary': os.environ['FREELLMAPI_API_KEY'] if mode == 'leak_final' else 'ok', 'prompt_has_staged_content': 'staged-secret-content' in prompt}), encoding='utf-8')\n",
@@ -642,10 +650,16 @@ class CodexExecAdapterTests(unittest.TestCase):
             with self.subTest(timeout=timeout), self.assertRaises(ValueError):
                 self.execute_fake("success", timeout_seconds=timeout)
 
+    def test_execute_deadline_covers_descendant_held_pipe_handles(self):
+        started = time.monotonic()
+        result = self.execute_fake("descendant", timeout_seconds=0.15)
+        self.assertEqual(result["outcome"], "timeout")
+        self.assertLess(time.monotonic() - started, 1)
+
     def test_execute_rejects_prompt_and_worker_outputs_that_contain_the_provider_key(self):
         self.assertEqual(self.execute_fake("success", prompt="secret-value")["outcome"],
                          "credential_leak")
-        for mode in ("leak_stdout", "leak_final"):
+        for mode in ("leak_stdout", "leak_stderr", "leak_split", "leak_final"):
             with self.subTest(mode=mode):
                 result = self.execute_fake(mode)
                 self.assertEqual(result["outcome"], "credential_leak")
@@ -683,6 +697,85 @@ class CodexExecAdapterTests(unittest.TestCase):
         oversized = b"x" * (self.telemetry().MAX_TELEMETRY_LINE_BYTES + 1)
         with self.assertRaises(ValueError):
             self.telemetry().parse_jsonl_usage(oversized)
+
+    def test_capture_detects_one_character_and_split_chunk_credentials(self):
+        for secret, chunks in ((b"x", [b"safe", b"x"]), (b"secret", [b"safe-se", b"cret"])):
+            with self.subTest(secret=secret):
+                class Chunks(io.RawIOBase):
+                    def read(self, _size):
+                        return chunks.pop(0) if chunks else b""
+
+                captured, exceeded, leaked = [], [False], [False]
+                self.adapter()._capture(Chunks(), 100, captured, exceeded, secret, leaked)
+                self.assertTrue(leaked[0])
+
+    def test_termination_wait_and_reap_share_the_operation_deadline(self):
+        process = mock.Mock(pid=12345)
+        process.wait.side_effect = subprocess.TimeoutExpired("fake", 0)
+        deadline = time.monotonic() + 0.02
+        signal_method = "killpg" if self.adapter().os.name == "posix" else "kill"
+        with mock.patch.object(self.adapter().os, signal_method) as group_signal:
+            self.adapter()._terminate_process_tree(process, deadline)
+        self.assertEqual(process.wait.call_count, 2)
+        if self.adapter().os.name == "posix":
+            self.assertEqual(group_signal.call_count, 2)
+        else:
+            self.assertTrue(process.kill.called)
+        for call in process.wait.call_args_list:
+            self.assertLessEqual(call.kwargs["timeout"], 0.02)
+
+    def test_final_output_rejects_links_and_fifo_before_blocking_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_text("{}", encoding="utf-8")
+            link = root / "link.json"
+            exercised = False
+            try:
+                link.symlink_to(target)
+            except OSError:
+                pass
+            else:
+                exercised = True
+                with self.assertRaises(ValueError):
+                    self.adapter()._read_final_output(link, 100)
+            if hasattr(os, "mkfifo"):
+                exercised = True
+                fifo = root / "output.fifo"
+                os.mkfifo(fifo)
+                with self.assertRaises(ValueError):
+                    self.adapter()._read_final_output(fifo, 100)
+            if not exercised:
+                self.skipTest("Host cannot create a link or FIFO")
+
+    def test_final_output_rejects_reparse_and_nonregular_entries_before_open(self):
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        entries = (
+            mock.Mock(st_mode=stat.S_IFREG, st_file_attributes=reparse),
+            mock.Mock(st_mode=stat.S_IFIFO, st_file_attributes=0),
+        )
+        for entry in entries:
+            with self.subTest(mode=entry.st_mode), \
+                    mock.patch.object(self.adapter().os, "lstat", return_value=entry), \
+                    mock.patch.object(self.adapter().os, "open",
+                                      side_effect=AssertionError("unsafe path was opened")):
+                with self.assertRaises(ValueError):
+                    self.adapter()._read_final_output(Path("unsafe-output"), 100)
+
+    def test_final_output_rejects_identity_change_between_lstat_and_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "expected.json"
+            replacement = root / "replacement.json"
+            expected.write_text('{"expected": true}', encoding="utf-8")
+            replacement.write_text('{"replacement": true}', encoding="utf-8")
+            before = os.lstat(expected)
+            real_open = os.open
+            with mock.patch.object(self.adapter().os, "lstat", return_value=before), \
+                    mock.patch.object(self.adapter().os, "open",
+                                      side_effect=lambda _path, flags: real_open(replacement, flags)):
+                with self.assertRaises(ValueError):
+                    self.adapter()._read_final_output(expected, 100)
 
 
 if __name__ == "__main__":

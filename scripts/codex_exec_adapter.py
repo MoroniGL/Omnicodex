@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import shlex
+import signal
 import stat
 import subprocess
 import threading
@@ -18,6 +19,7 @@ MAX_CAPTURE_BYTES = 524_288
 MAX_FINAL_MESSAGE_BYTES = 262_144
 MAX_TIMEOUT_SECONDS = 300
 _SECRET_ENV_KEY = "FREELLMAPI_API_KEY"
+_MAX_CLEANUP_RESERVE_SECONDS = 0.1
 
 
 def _scope_module():
@@ -79,15 +81,18 @@ def _capture(stream, limit: int, captured: list[bytes], exceeded: list[bool], se
              leaked: list[bool]) -> None:
     size = 0
     tail = b""
-    while chunk := stream.read(65_536):
-        if secret and secret in tail + chunk:
-            leaked[0] = True
-        tail = (tail + chunk)[-(max(0, len(secret) - 1)):]
-        if size < limit:
-            captured.append(chunk[:limit - size])
-        size += len(chunk)
-        if size > limit:
-            exceeded[0] = True
+    try:
+        while chunk := stream.read(65_536):
+            if secret and secret in tail + chunk:
+                leaked[0] = True
+            tail = (tail + chunk)[-(len(secret) - 1):] if len(secret) > 1 else b""
+            if size < limit:
+                captured.append(chunk[:limit - size])
+            size += len(chunk)
+            if size > limit:
+                exceeded[0] = True
+    finally:
+        _close_stream(stream)
 
 
 def _result(outcome: str, exit_code: int | None, started: float, **extra: Any) -> dict[str, Any]:
@@ -104,11 +109,18 @@ def _close_stream(stream) -> None:
 
 
 def _read_final_output(path: Path, limit: int) -> bytes:
+    before = os.lstat(path)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(before, "st_file_attributes", 0)
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or \
+            (reparse and attributes & reparse):
+        raise ValueError("Final output is not a safe regular file")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        if not stat.S_ISREG(info.st_mode) or (before.st_dev, before.st_ino) != \
+                (info.st_dev, info.st_ino) or info.st_size > limit:
             raise ValueError("Final output is unavailable or exceeds its limit")
         raw = os.read(descriptor, limit + 1)
         if len(raw) > limit:
@@ -116,6 +128,49 @@ def _read_final_output(path: Path, limit: int) -> bytes:
         return raw
     finally:
         os.close(descriptor)
+
+
+def _signal_process_tree(process: subprocess.Popen[bytes], *, force: bool) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif not force and hasattr(signal, "CTRL_BREAK_EVENT"):
+            # CREATE_NEW_PROCESS_GROUP makes the process id a Windows console
+            # group id.  os.kill targets that group even if its leader exited.
+            os.kill(process.pid, signal.CTRL_BREAK_EVENT)
+        elif force:
+            process.kill()
+        else:
+            process.terminate()
+    except (OSError, ValueError):
+        try:
+            process.kill() if force else process.terminate()
+        except OSError:
+            pass
+
+
+def _wait_for_process(process: subprocess.Popen[bytes], deadline: float) -> bool:
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes], deadline: float) -> None:
+    _signal_process_tree(process, force=False)
+    remaining = max(0.0, deadline - time.monotonic())
+    graceful_deadline = time.monotonic() + remaining / 2
+    if _wait_for_process(process, graceful_deadline):
+        return
+    _signal_process_tree(process, force=True)
+    _wait_for_process(process, deadline)
+
+
+def _join_threads(threads: Sequence[threading.Thread], deadline: float) -> bool:
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return not any(thread.is_alive() for thread in threads)
 
 
 def execute_codex_exec(argv: Sequence[str], prompt: str, *, timeout_seconds: float,
@@ -151,9 +206,17 @@ def execute_codex_exec(argv: Sequence[str], prompt: str, *, timeout_seconds: flo
     else:
         return _result("stale_output", None, started)
     deadline = started + float(timeout_seconds)
+    cleanup_reserve = min(_MAX_CLEANUP_RESERVE_SECONDS, float(timeout_seconds) / 2)
+    worker_deadline = deadline - cleanup_reserve
+    popen_options: dict[str, Any] = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
+                                     "stderr": subprocess.PIPE, "shell": False,
+                                     "env": execution_environment}
+    if os.name == "posix":
+        popen_options["start_new_session"] = True
+    else:
+        popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
-        process = subprocess.Popen(values, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   shell=False, env=execution_environment)
+        process = subprocess.Popen(values, **popen_options)
     except OSError:
         return _result("start_failed", None, started)
     stdout, stderr, stdout_exceeded, stderr_exceeded, leaked = [], [], [False], [False], [False]
@@ -177,26 +240,17 @@ def execute_codex_exec(argv: Sequence[str], prompt: str, *, timeout_seconds: flo
     writer.start()
     timed_out = False
     try:
-        process.wait(timeout=max(0, deadline - time.monotonic()))
+        process.wait(timeout=max(0, worker_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         timed_out = True
+    threads = [writer, *readers]
     if timed_out:
-        process.terminate()
-        try:
-            process.wait(timeout=max(0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            process.kill()
-        _close_stream(process.stdin)
-        _close_stream(process.stdout)
-        _close_stream(process.stderr)
+        _terminate_process_tree(process, deadline)
+        _join_threads(threads, deadline)
         return _result("timeout", None, started)
-    for thread in [writer, *readers]:
-        thread.join(max(0, deadline - time.monotonic()))
-    alive = any(thread.is_alive() for thread in [writer, *readers])
-    _close_stream(process.stdin)
-    _close_stream(process.stdout)
-    _close_stream(process.stderr)
-    if alive:
+    if not _join_threads(threads, worker_deadline):
+        _terminate_process_tree(process, deadline)
+        _join_threads(threads, deadline)
         return _result("timeout", None, started)
     if leaked[0]:
         return _result("credential_leak", process.returncode, started)
