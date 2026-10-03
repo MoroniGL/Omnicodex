@@ -200,7 +200,7 @@ class EfficiencyTests(unittest.TestCase):
             self.manifest, self.offload_metrics(), "balanced"
         )
         self.assertEqual(result["route"], "free_context_worker")
-        self.assertEqual(result["provider"], "freellmapi")
+        self.assertEqual(result["provider"], "gemini_direct")
         self.assertTrue(result["read_only_worker"])
         self.assertTrue(result["parallel_read_only_ok"])
         self.assertFalse(result["quota_fallback"])
@@ -265,7 +265,7 @@ class EfficiencyTests(unittest.TestCase):
         self.assertFalse(result["quota_fallback"])
 
     def test_manifest_keeps_quota_fallback_disabled(self):
-        self.assertEqual(self.manifest["token_offload"]["provider"], "freellmapi")
+        self.assertEqual(self.manifest["token_offload"]["provider"], "gemini_direct")
         self.assertFalse(self.manifest["token_offload"]["quota_fallback"])
         self.assertTrue(self.manifest["token_offload"]["workspace_opt_in_required"])
         self.assertTrue(self.manifest["token_offload"]["sensitive_externalization_forbidden"])

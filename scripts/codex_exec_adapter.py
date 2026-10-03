@@ -1,4 +1,8 @@
-"""Construct and run one bounded, isolated Codex exec worker."""
+"""Experimental legacy FreeLLMAPI/Codex adapter; never used by Gemini Direct.
+
+Retained for compatibility tests only. The normal context worker does not import
+or invoke this module and has no Codex subprocess or OS sandbox dependency.
+"""
 import importlib.util
 import json
 import math

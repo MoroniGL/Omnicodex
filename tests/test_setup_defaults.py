@@ -38,6 +38,10 @@ class SetupDefaultsTests(unittest.TestCase):
             "scripts/codex_exec_adapter.py",
             "scripts/offload_telemetry.py",
             "scripts/free_context_worker.py",
+            "scripts/validate_gemini.py",
+            "scripts/providers/__init__.py",
+            "scripts/providers/base.py",
+            "scripts/providers/gemini.py",
             "integrations/efficiency.json",
             "schemas/evidence-pack.schema.json",
         ):
@@ -53,7 +57,9 @@ class SetupDefaultsTests(unittest.TestCase):
     def test_preview_has_no_writes(self):
         result = self.run_setup()
         self.assertEqual(result["mode"], "preview")
-        self.assertEqual(result["assets"], 23)
+        self.assertEqual(result["assets"], 27)
+        self.assertEqual(result["offload_status"]["native_status"], "READY")
+        self.assertEqual(result["offload_status"]["free_context_offload"], "NOT CONFIGURED")
         self.assertFalse((self.home / "omnicodex").exists())
         self.assertFalse(self.skills.exists())
 
@@ -64,10 +70,14 @@ class SetupDefaultsTests(unittest.TestCase):
         self.assertTrue((self.skills / "omnicodex/references/token-offload.md").exists())
         self.assertTrue(d.status(self.home)["managed_block_intact"])
         manifest = json.loads((self.home / "omnicodex/install-manifest.json").read_text())
-        self.assertEqual(len(manifest["files"]), 23)
+        self.assertEqual(len(manifest["files"]), 27)
         self.assertEqual(
             (self.home / "omnicodex/scripts/free_context_worker.py").read_text(),
             "fixture scripts/free_context_worker.py\n",
+        )
+        self.assertEqual(
+            (self.home / "omnicodex/scripts/providers/gemini.py").read_text(),
+            "fixture scripts/providers/gemini.py\n",
         )
 
     def test_setup_update_preserves_selection(self):

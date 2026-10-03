@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,12 +25,33 @@ RUNTIME_FILES = {
     "scripts/codex_exec_adapter.py",
     "scripts/offload_telemetry.py",
     "scripts/free_context_worker.py",
+    "scripts/validate_gemini.py",
+    "scripts/providers/__init__.py",
+    "scripts/providers/base.py",
+    "scripts/providers/gemini.py",
     "integrations/efficiency.json",
     "schemas/evidence-pack.schema.json",
 }
 
 
 class InstallerTests(unittest.TestCase):
+    def test_installed_session_status_loads_provider_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home, skills = base / "home", base / "skills"
+            install(ROOT, home, skills)
+            session = home / "omnicodex" / "session_switch.py"
+            shutil.copyfile(ROOT / "scripts" / "session_switch.py", session)
+            env = dict(os.environ, GEMINI_API_KEY="status-fixture-key")
+            env.pop("PYTHONPATH", None)
+            result = subprocess.run([sys.executable, str(session), "doctor", "--codex-home", str(home)],
+                                    cwd=base, env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            status = json.loads(result.stdout)
+            self.assertEqual(status["free_context_offload"]["status"], "READY")
+            self.assertFalse(status["free_context_offload"]["connectivity_verified"])
+            self.assertNotIn("status-fixture-key", result.stdout + result.stderr)
+
     def test_installs_all_profiles_agents_and_skill_without_changing_base_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -65,7 +89,9 @@ class InstallerTests(unittest.TestCase):
                     (codex_home / "omnicodex" / relative).read_bytes(),
                     (ROOT / relative).read_bytes(),
                 )
-            self.assertEqual(len(manifest["files"]), 23)
+            self.assertEqual(len(manifest["files"]), 27)
+            self.assertEqual(manifest["offload_status"]["native_status"], "READY")
+            self.assertEqual(manifest["offload_status"]["connectivity_verified"], False)
             self.assertTrue(any(item["destination"] == str(references["token-offload.md"].resolve())
                                 for item in manifest["files"]))
             self.assertEqual(
@@ -73,6 +99,55 @@ class InstallerTests(unittest.TestCase):
                 "installed",
             )
             self.assertEqual((Path(manifest["backup"]) / "config.toml").read_text(), original_config)
+
+    def test_installed_worker_doctor_runs_outside_repo_without_a_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            codex_home.mkdir()
+            install(ROOT, codex_home, skills_home)
+            environment = dict(os.environ)
+            environment.pop("GEMINI_API_KEY", None)
+            environment.pop("OMNICODEX_GEMINI_MODEL", None)
+            environment.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [sys.executable, str(codex_home / "omnicodex/scripts/free_context_worker.py"), "doctor"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["native_status"], "READY")
+            self.assertEqual(report["free_context_offload"], "NOT CONFIGURED")
+            self.assertFalse(report["connectivity_verified"])
+
+    def test_installer_cli_reports_offline_status_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            codex_home.mkdir()
+            environment = dict(os.environ)
+            environment.pop("GEMINI_API_KEY", None)
+            environment.pop("OMNICODEX_GEMINI_MODEL", None)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/install.py"), "--repo-root", str(ROOT),
+                 "--codex-home", str(codex_home), "--skills-home", str(skills_home)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["offload_status"]["native_status"], "READY")
+            self.assertEqual(report["offload_status"]["free_context_offload"], "NOT CONFIGURED")
+            self.assertFalse(report["offload_status"]["connectivity_verified"])
 
     def test_refuses_to_replace_a_conflicting_destination_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

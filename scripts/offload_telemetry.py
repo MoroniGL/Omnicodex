@@ -1,4 +1,7 @@
-"""Bounded parsing for trustworthy Codex JSONL runtime telemetry."""
+"""Legacy Codex JSONL telemetry for the experimental compatibility adapter.
+
+Gemini Direct obtains telemetry from its HTTP response and never uses this parser.
+"""
 import io
 import json
 from typing import Any, BinaryIO

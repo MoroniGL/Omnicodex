@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -27,12 +28,57 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def parse_bounded_json(raw: bytes | str, limit: int = MAX_INPUT_BYTES,
+                       max_depth: int = 32) -> Any:
+    """Reject ambiguous, nonfinite, oversized or deeply nested JSON before allocation."""
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            require(key not in value, "Duplicate JSON key")
+            value[key] = item
+        return value
+
+    def reject_constant(value: str) -> Any:
+        raise ValueError("Nonfinite JSON constant")
+
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        require(math.isfinite(parsed), "Nonfinite JSON number")
+        return parsed
+
+    try:
+        require(isinstance(raw, (bytes, str)), "JSON must be text")
+        require(len(raw if isinstance(raw, bytes) else raw.encode("utf-8")) <= limit,
+                "JSON exceeds byte limit")
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        depth, quoted, escaped = 0, False, False
+        for character in text:
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    quoted = False
+            elif character == '"':
+                quoted = True
+            elif character in "[{":
+                depth += 1
+                require(depth <= max_depth, "JSON nesting exceeds limit")
+            elif character in "]}":
+                depth -= 1
+        return json.loads(text, object_pairs_hook=unique, parse_constant=reject_constant,
+                          parse_float=finite_float)
+    except (ValueError, UnicodeError, TypeError, RecursionError):
+        raise ValueError("Invalid bounded JSON") from None
+
+
 def read_json(path: Path, limit: int = MAX_INPUT_BYTES) -> dict[str, Any]:
     # Bound allocation even if a file grows while being read. Never echo its contents.
     with path.open("rb") as stream:
         raw = stream.read(limit + 1)
     require(len(raw) <= limit, "JSON file exceeds the configured input limit")
-    data = json.loads(raw)
+    data = parse_bounded_json(raw, limit)
     require(isinstance(data, dict), "JSON root must be an object")
     return data
 
@@ -55,7 +101,7 @@ def validate_manifest(data: dict[str, Any]) -> None:
         require(policy.get(key) is True, "Required safety policy disabled")
     require(policy.get("automatic_installation") is False, "Automatic installation forbidden")
     offload = data.get("token_offload", {})
-    require(offload.get("provider") == "freellmapi", "Token offload provider mismatch")
+    require(offload.get("provider") == "gemini_direct", "Token offload provider mismatch")
     require(isinstance(offload.get("model_selector"), str) and offload["model_selector"],
             "Token offload model selector missing")
     require(offload.get("read_only_default") is True, "Token offload must default read-only")
@@ -170,7 +216,8 @@ def make_plan(manifest: dict[str, Any], inventory: dict[str, Any] | None,
 
 
 def validate_offload_metrics(data: dict[str, Any], require_provider_available: bool = True) -> None:
-    require(data.get("schema_version") == 1, "Unsupported offload metrics schema")
+    require(type(data.get("schema_version")) is int and data["schema_version"] == 1,
+            "Unsupported offload metrics schema")
     require(data.get("task_kind") in OFFLOAD_TASKS, "Unknown offload task")
     require(data.get("data_classification") in DATA_CLASSES, "Unknown data classification")
     require(type(data.get("external_offload_approved")) is bool, "Approval must be boolean")
@@ -265,7 +312,8 @@ def _bounded_text(value: Any, limit: int) -> bool:
 
 
 def validate_evidence_pack(pack: dict[str, Any]) -> None:
-    require(pack.get("schema_version") == 1, "Unsupported EvidencePack schema")
+    require(isinstance(pack, dict) and type(pack.get("schema_version")) is int and
+            pack["schema_version"] == 1, "Unsupported EvidencePack schema")
     require(pack.get("status") in PACK_STATUSES, "Invalid EvidencePack status")
     require(pack.get("task_kind") in OFFLOAD_TASKS, "Invalid EvidencePack task")
     require(_bounded_text(pack.get("snapshot"), 512), "Invalid EvidencePack snapshot")
@@ -293,6 +341,7 @@ def validate_evidence_pack(pack: dict[str, Any]) -> None:
                     "Invalid EvidencePack evidence shape")
             require(_repo_relative_path(item["path"]) and item["kind"] in EVIDENCE_KINDS,
                     "Invalid EvidencePack evidence reference")
+            require(item["path"] in files, "EvidencePack citation missing from relevant files")
             require(type(item["start_line"]) is int and type(item["end_line"]) is int and
                     1 <= item["start_line"] <= item["end_line"] and
                     item["end_line"] - item["start_line"] <= 500,

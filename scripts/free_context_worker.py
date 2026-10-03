@@ -1,66 +1,45 @@
 #!/usr/bin/env python3
-"""Run one bounded, read-only FreeLLMAPI context worker for OmniCodex."""
+"""Capture approved context locally and obtain compact evidence via Gemini Direct."""
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import importlib
 import json
 import math
 import os
-import shutil
+import re
 import stat
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-
+from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts import efficiency, offload_scope as scope
+from scripts.providers.gemini import GeminiProvider
+from scripts.providers.base import ProviderError
+
 MANIFEST = ROOT / "integrations" / "efficiency.json"
 OUTPUT_SCHEMA = ROOT / "schemas" / "evidence-pack.schema.json"
-DEFAULT_BASE_URL = "http://127.0.0.1:3001/v1"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MAX_ARTIFACT_BYTES = 524_288
 MAX_TIMEOUT_SECONDS = 300.0
-SECRET_ENV_KEY = "FREELLMAPI_API_KEY"
+# Require at least 20% reduction, including exact ranges the premium parent reopens.
+MAX_HANDOFF_FRACTION = 0.8
 
 
 def _load_local(name: str) -> Any:
-    path = Path(__file__).with_name(name + ".py")
-    spec = importlib.util.spec_from_file_location("_free_context_" + name, path)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"Required module is unavailable: {name}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("scripts." + name)
 
 
 def _environment(environment: Mapping[str, str] | None) -> dict[str, str]:
     values = dict(os.environ if environment is None else environment)
-    if not all(isinstance(key, str) and isinstance(value, str)
-               for key, value in values.items()):
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in values.items()):
         raise ValueError("Worker environment must contain strings")
     return values
-
-
-def _resolve_codex_prefix(explicit: Sequence[str] | None,
-                          environment: Mapping[str, str]) -> tuple[str, ...] | None:
-    if explicit is not None:
-        if isinstance(explicit, (str, bytes)) or not explicit or not all(
-                isinstance(item, str) and item for item in explicit):
-            raise ValueError("Invalid Codex executable prefix")
-        prefix = tuple(explicit)
-    else:
-        configured = environment.get("OMNICODEX_CODEX_PATH")
-        executable = configured or shutil.which("codex", path=environment.get("PATH", ""))
-        if not executable:
-            return None
-        prefix = (executable,)
-    first = Path(prefix[0])
-    if first.is_absolute() or first.parent != Path("."):
-        return prefix if first.is_file() else None
-    return prefix if shutil.which(prefix[0], path=environment.get("PATH", "")) else None
 
 
 def _is_link_or_reparse(info: os.stat_result) -> bool:
@@ -159,31 +138,13 @@ def _fallback(plan: dict[str, Any], reason: str | None = None) -> dict[str, Any]
     }
 
 
-def _prompt(request: dict[str, Any], captured: Any, plan: dict[str, Any]) -> str:
-    paths = [entry.path for entry in captured.entries]
-    return (
-        "You are an isolated read-only OmniCodex context worker. Read only the staged "
-        "workspace supplied as your current directory. Do not use the web, execute writes, "
-        "or modify Git state. Return only an EvidencePack matching the supplied schema. "
-        "Keep findings concise and cite exact repo-relative line ranges. Do not include raw "
-        "files or full logs.\n"
-        f"task_kind={request['task_kind']}\n"
-        f"objective={request['objective']}\n"
-        f"snapshot={captured.fingerprint}\n"
-        f"approved_files={json.dumps(paths, ensure_ascii=False)}\n"
-        f"target_pack_tokens={plan['target_pack_tokens']}\n"
-        f"max_pack_tokens={plan['max_pack_tokens']}\n"
-    )
-
-
 def _verification_evidence_bytes(pack: dict[str, Any], captured: Any) -> int:
     entries = {entry.path: entry.data.splitlines(keepends=True) for entry in captured.entries}
     intervals: dict[str, list[tuple[int, int]]] = {}
     for finding in pack["findings"]:
         for evidence in finding["evidence"]:
             intervals.setdefault(evidence["path"], []).append(
-                (evidence["start_line"] - 1, evidence["end_line"])
-            )
+                (evidence["start_line"] - 1, evidence["end_line"]))
     total = 0
     for path, ranges in intervals.items():
         merged: list[list[int]] = []
@@ -192,304 +153,185 @@ def _verification_evidence_bytes(pack: dict[str, Any], captured: Any) -> int:
                 merged[-1][1] = max(merged[-1][1], end)
             else:
                 merged.append([start, end])
-        lines = entries[path]
-        total += sum(len(b"".join(lines[start:end])) for start, end in merged)
+        total += sum(len(b"".join(entries[path][start:end])) for start, end in merged)
     return total
 
 
 def _validate_pack(pack: dict[str, Any], request: dict[str, Any], captured: Any,
-                   workspace: Path, plan: dict[str, Any], efficiency: Any,
-                   scope: Any, manifest: dict[str, Any]) -> tuple[int, int]:
+                   plan: dict[str, Any], manifest: dict[str, Any]) -> tuple[int, int]:
     efficiency.validate_evidence_pack(pack)
     if pack["task_kind"] != request["task_kind"] or pack["snapshot"] != captured.fingerprint:
         raise ValueError("EvidencePack identity mismatch")
-    approved = [entry.path for entry in captured.entries]
+    approved = {entry.path for entry in captured.entries}
     if not set(pack["relevant_files"]).issubset(approved):
         raise ValueError("EvidencePack references files outside the captured scope")
     references = [item for finding in pack["findings"] for item in finding["evidence"]]
-    scope.validate_evidence_references(workspace, approved, references)
+    scope.validate_captured_references(captured, references)
+    # Reject common instruction injection. All remaining prose is still untrusted;
+    # parent acceptance requires opening exact source ranges, never executing prose.
+    instruction = re.compile(
+        r"\b(?:ignore (?:all |previous |prior )?instructions|"
+        r"run (?:shell|powershell|bash|cmd|commands)|execute (?:commands|code)|"
+        r"delete (?:files|the workspace)|system prompt)\b", re.IGNORECASE)
+    if instruction.search(json.dumps(pack, ensure_ascii=False)):
+        raise ValueError("EvidencePack contains operational instructions")
     pack_tokens = efficiency.estimate_pack_tokens(manifest, pack)
     if pack_tokens > plan["max_pack_tokens"]:
         raise ValueError("EvidencePack exceeds the profile budget")
     divisor = manifest["token_offload"]["chars_per_token"]
     evidence_bytes = _verification_evidence_bytes(pack, captured)
     evidence_tokens = (evidence_bytes + divisor - 1) // divisor
-    if pack_tokens + evidence_tokens >= plan["estimated_raw_tokens"]:
-        raise ValueError("Compact handoff would not reduce premium context")
+    if pack_tokens + evidence_tokens > int(plan["estimated_raw_tokens"] * MAX_HANDOFF_FRACTION):
+        raise ValueError("Compact handoff would not meaningfully reduce premium context")
     return pack_tokens, evidence_tokens
 
 
-def _scope_unchanged(workspace: Path, request: dict[str, Any], captured: Any,
-                     scope: Any) -> tuple[bool, str | None]:
+def _scope_unchanged(workspace: Path, captured: Any,
+                     approved_paths: list[str] | None = None) -> tuple[bool, str | None]:
     try:
-        current = scope.capture_scope(workspace, request["approved_paths"])
+        if approved_paths is not None:
+            # Check directory membership by metadata without opening newly added files.
+            current_paths = scope._collect_approved_scope(workspace, approved_paths)
+            if current_paths != [entry.path for entry in captured.entries]:
+                return False, None
+        # Never expand directories again: only files approved in the immutable capture.
+        current = scope.capture_scope(workspace, [entry.path for entry in captured.entries])
     except (OSError, ValueError, UnicodeError):
         return False, None
     return current.fingerprint == captured.fingerprint, current.fingerprint
 
 
-def _failure_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str,
-                     captured: Any, execution: dict[str, Any], reason: str,
-                     snapshot_after: str | None) -> dict[str, Any]:
-    telemetry = execution.get("telemetry", {})
-    return {
-        "schema_version": 1,
-        "mode": "live_token_offload_receipt",
-        "profile": profile,
-        "task_kind": metrics["task_kind"],
-        "route": "free_context_worker",
-        "provider": "freellmapi",
-        "requested_provider": "freellmapi",
-        "requested_model": "auto",
-        "worker_outcome": execution.get("outcome", "validation_failed"),
-        "worker_exit_status": execution.get("exit_code"),
-        "failure_reason": reason,
-        "elapsed_ms": execution.get("elapsed_ms"),
+def _receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str,
+             captured: Any, telemetry: dict[str, Any], reason: str,
+             snapshot_after: str | None, pack: dict[str, Any] | None = None,
+             pack_tokens: int | None = None, evidence_tokens: int | None = None) -> dict[str, Any]:
+    compact = pack_tokens + evidence_tokens if pack_tokens is not None and evidence_tokens is not None else None
+    avoided = plan["estimated_raw_tokens"] - compact if compact is not None else None
+    receipt = {
+        "schema_version": 1, "mode": "live_token_offload_receipt", "profile": profile,
+        "task_kind": metrics["task_kind"], "route": "free_context_worker",
+        "provider": "gemini_direct", "requested_provider": "gemini_direct",
+        "requested_model": telemetry.get("requested_model"),
+        "worker_outcome": reason or "completed", "worker_exit_status": None,
+        "failure_reason": reason or None, "elapsed_ms": telemetry.get("elapsed_ms"),
         "estimated_raw_tokens": plan["estimated_raw_tokens"],
         "captured_raw_bytes": sum(len(entry.data) for entry in captured.entries),
-        "estimated_evidence_pack_tokens": None,
-        "estimated_verification_evidence_tokens": None,
-        "estimated_compact_handoff_tokens": None,
-        "estimated_premium_context_avoided": None,
-        "input_tokens": telemetry.get("input_tokens"),
-        "cached_input_tokens": telemetry.get("cached_input_tokens"),
-        "output_tokens": telemetry.get("output_tokens"),
-        "reasoning_output_tokens": telemetry.get("reasoning_output_tokens"),
-        "served_model": None,
-        "served_provider": None,
-        "retry_count": telemetry.get("retry_count"),
-        "fallback_count": telemetry.get("fallback_count"),
-        "validation_result": "rejected",
-        "evidence_pack_status": None,
-        "native_fallback_recommended": True,
-        "snapshot_before": captured.fingerprint,
-        "snapshot_after": snapshot_after,
-        "actual_premium_parent_usage": None,
-        "billing_verified": False,
-        "subscription_allowance_verified": False,
-        "quota_fallback": False,
-        "artifacts": {"receipt": "receipt.json", "evidence_pack": None},
-    }
-
-
-def _success_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str,
-                     captured: Any, execution: dict[str, Any], pack: dict[str, Any],
-                     pack_tokens: int, evidence_tokens: int,
-                     efficiency: Any, manifest: dict[str, Any],
-                     snapshot_after: str) -> dict[str, Any]:
-    receipt = efficiency.make_offload_receipt(manifest, metrics, pack, profile)
-    telemetry = execution["telemetry"]
-    receipt.update({
-        "mode": "live_token_offload_receipt",
-        "requested_provider": "freellmapi",
-        "requested_model": "auto",
-        "worker_outcome": execution["outcome"],
-        "worker_exit_status": execution["exit_code"],
-        "elapsed_ms": execution["elapsed_ms"],
-        "input_tokens": telemetry["input_tokens"],
-        "cached_input_tokens": telemetry["cached_input_tokens"],
-        "output_tokens": telemetry["output_tokens"],
-        "reasoning_output_tokens": telemetry["reasoning_output_tokens"],
-        "served_model": None,
-        "served_provider": None,
-        "retry_count": telemetry["retry_count"],
-        "fallback_count": telemetry["fallback_count"],
-        "validation_result": "accepted",
-        "evidence_pack_status": pack["status"],
-        "native_fallback_recommended": False,
-        "snapshot_before": captured.fingerprint,
-        "snapshot_after": snapshot_after,
-        "actual_premium_parent_usage": None,
-        "subscription_allowance_verified": False,
-        "artifacts": {"receipt": "receipt.json", "evidence_pack": "evidence-pack.json"},
-    })
-    # Preserve the locally measured value even if receipt internals evolve.
-    receipt["estimated_evidence_pack_tokens"] = pack_tokens
-    compact_tokens = pack_tokens + evidence_tokens
-    raw_tokens = plan["estimated_raw_tokens"]
-    avoided = max(0, raw_tokens - compact_tokens)
-    receipt.update({
-        "captured_raw_bytes": sum(len(entry.data) for entry in captured.entries),
+        "estimated_evidence_pack_tokens": pack_tokens,
         "estimated_verification_evidence_tokens": evidence_tokens,
-        "estimated_compact_handoff_tokens": compact_tokens,
+        "estimated_compact_handoff_tokens": compact,
         "estimated_premium_context_avoided": avoided,
-        "estimated_reduction_fraction": round(avoided / raw_tokens, 4) if raw_tokens else 0.0,
-    })
+        "estimated_reduction_fraction": round(avoided / plan["estimated_raw_tokens"], 4) if avoided is not None else None,
+        "validation_result": "rejected" if reason else "accepted",
+        "evidence_pack_status": pack["status"] if pack else None,
+        "evidence_trust": "untrusted_until_premium_source_verification",
+        "native_fallback_recommended": bool(reason),
+        "snapshot_before": captured.fingerprint, "snapshot_after": snapshot_after,
+        "snapshot_scope": "captured_files_only",
+        "actual_premium_parent_usage": None, "billing_verified": False,
+        "subscription_allowance_verified": False, "quota_fallback": False,
+        "artifacts": {"receipt": "receipt.json", "evidence_pack": "evidence-pack.json" if not reason else None},
+    }
+    for field in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens",
+                  "served_model", "retry_count"):
+        receipt[field] = telemetry.get(field)
+    receipt["served_provider"] = None
+    receipt["fallback_count"] = 0  # This implementation never retries another route/provider.
     return receipt
 
 
 def run_action(action: str, workspace: Path | None, request_path: Path | None,
-               profile: str, codex_prefix: Sequence[str] | None,
-               artifacts: Path | None, timeout_seconds: float,
-               *, environment: Mapping[str, str] | None = None) -> tuple[dict[str, Any], int]:
-    """Execute doctor, dry-run, or one live worker invocation."""
+               profile: str, artifacts: Path | None, timeout_seconds: float,
+               *, environment: Mapping[str, str] | None = None,
+               transport: Any | None = None) -> tuple[dict[str, Any], int]:
+    """Execute an offline doctor/gate or one direct provider request."""
     if action not in {"doctor", "dry-run", "run"}:
         raise ValueError("Unknown worker action")
-    if action != "doctor" and (
-            not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or
-            not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS):
+    if profile not in efficiency.PROFILES:
+        raise ValueError("Unknown profile")
+    if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds) or
+            not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS):
         raise ValueError("Invalid worker timeout")
     env = _environment(environment)
-    scope = _load_local("offload_scope")
-    endpoint = scope.validate_endpoint(env.get("FREELLMAPI_BASE_URL", DEFAULT_BASE_URL))
-    prefix = _resolve_codex_prefix(codex_prefix, env)
-    key_configured = bool(env.get(SECRET_ENV_KEY))
+    provider = GeminiProvider(environment=env, transport=transport)
+    settings = provider.status()
     if action == "doctor":
-        return ({
-            "schema_version": 1,
-            "mode": "free_context_worker_doctor",
-            "codex_available": prefix is not None,
-            "key_configured": key_configured,
-            "endpoint_configured": bool(endpoint),
-            "gateway_probed": False,
-            "runtime_model_verified": False,
-            "quota_fallback": False,
-            "notice": "Offline prerequisite check only; no gateway request was made.",
-        }, 0)
+        return ({"schema_version": 1, "mode": "free_context_worker_doctor",
+                 "native_status": "READY", "provider": settings["provider"],
+                 "model": settings["model"], "key_configured": bool(env.get("GEMINI_API_KEY")),
+                 "free_context_offload": "READY" if settings["configured"] else "NOT CONFIGURED",
+                 "connectivity_verified": False, "runtime_model_verified": False,
+                 "quota_fallback": False,
+                 "notice": "Offline configuration check; use validate_gemini.py for connectivity."}, 0)
     if workspace is None or request_path is None:
         raise ValueError("Workspace and request are required")
-    workspace = workspace.resolve(strict=True)
-    request_path = request_path.resolve(strict=True)
-    efficiency = _load_local("efficiency")
     manifest = efficiency.read_json(MANIFEST)
     efficiency.validate_manifest(manifest)
     request = efficiency.read_json(request_path)
-    scope.validate_worker_request(request)
+    scope.validate_worker_request(request)  # Privacy checks precede any workspace file open.
     captured = scope.capture_scope(workspace, request["approved_paths"])
     expected = request.get("expected_snapshot")
     if expected is not None and expected != captured.fingerprint:
-        return ({
-            "schema_version": 1, "status": "failed", "route": "native",
-            "reason_code": "snapshot_mismatch", "native_fallback_recommended": True,
-            "quota_fallback": False,
-        }, 3)
-    provider_available = key_configured and prefix is not None
-    metrics, plan = _gate(
-        request, captured, profile, provider_available, efficiency, manifest
-    )
-    if not provider_available:
-        # Preserve the cost-gate reason for genuinely small work while still
-        # recording real provider availability in the production plan.
+        return ({"schema_version": 1, "status": "failed", "route": "native",
+                 "reason_code": "snapshot_mismatch", "native_fallback_recommended": True,
+                 "quota_fallback": False}, 3)
+    metrics, plan = _gate(request, captured, profile, settings["configured"], efficiency, manifest)
+    if not settings["configured"]:
         _, eligible_plan = _gate(request, captured, profile, True, efficiency, manifest)
         if eligible_plan["route"] != "free_context_worker":
             return _fallback(eligible_plan), 0
-        missing = "missing_key" if not key_configured else "codex_unavailable"
-        return _fallback(plan, missing), 0
+        return _fallback(plan, "missing_key" if not env.get("GEMINI_API_KEY") else "provider_not_configured"), 0
     if plan["route"] != "free_context_worker":
         return _fallback(plan), 0
-    adapter = _load_local("codex_exec_adapter")
-    preview_argv = adapter.build_codex_exec_argv(
-        prefix, Path("<staged-workspace>"), OUTPUT_SCHEMA, Path("<worker-output.json>"),
-        endpoint=endpoint,
-    )
     if action == "dry-run":
-        return ({
-            "schema_version": 1,
-            "status": "ready",
-            "route": "free_context_worker",
-            "reason_codes": plan["reason_codes"],
-            "snapshot": captured.fingerprint,
-            "approved_files": [entry.path for entry in captured.entries],
-            "estimated_raw_tokens": plan["estimated_raw_tokens"],
-            "target_pack_tokens": plan["target_pack_tokens"],
-            "max_pack_tokens": plan["max_pack_tokens"],
-            "requested_model": "auto",
-            "command_preview_windows": adapter.format_command(preview_argv, platform="windows"),
-            "command_preview_posix": adapter.format_command(preview_argv, platform="posix"),
-            "network_requests": 0,
-            "quota_fallback": False,
-            "runtime_model_verified": False,
-        }, 0)
-
+        return ({"schema_version": 1, "status": "ready", "route": "free_context_worker",
+                 "reason_codes": plan["reason_codes"], "snapshot": captured.fingerprint,
+                 "approved_files": [entry.path for entry in captured.entries],
+                 "estimated_raw_tokens": plan["estimated_raw_tokens"],
+                 "target_pack_tokens": plan["target_pack_tokens"], "max_pack_tokens": plan["max_pack_tokens"],
+                 "requested_provider": settings["provider"], "requested_model": settings["model"],
+                 "network_requests": 0, "quota_fallback": False, "runtime_model_verified": False}, 0)
     artifact_dir = _artifact_directory(artifacts, workspace)
-    output_path = artifact_dir / "worker-output.json"
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="omnicodex-stage-") as stage_parent_name:
-        stage_parent = Path(stage_parent_name)
-        stage, staged = scope.stage_captured_scope(captured, stage_parent)
-        if staged.fingerprint != captured.fingerprint:
-            raise ValueError("Staged snapshot mismatch")
-        argv = adapter.build_codex_exec_argv(
-            prefix, stage, OUTPUT_SCHEMA, output_path, endpoint=endpoint
-        )
-        execution = adapter.execute_codex_exec(
-            argv, _prompt(request, captured, plan), timeout_seconds=timeout_seconds,
-            environment=env,
-        )
-    unchanged, snapshot_after = _scope_unchanged(workspace, request, captured, scope)
+    telemetry = {"requested_model": settings["model"], "retry_count": 0}
+    pack = None
+    pack_tokens = evidence_tokens = None
+    reason = ""
+    try:
+        result = provider.generate_evidence_pack(
+            {"task_kind": request["task_kind"], "objective": request["objective"]},
+            captured, efficiency.read_json(OUTPUT_SCHEMA),
+            {"timeout_seconds": timeout_seconds, "target_pack_tokens": plan["target_pack_tokens"],
+             "max_output_tokens": min(16384, plan["max_pack_tokens"] * 2 + 512)})
+        telemetry = result.telemetry
+        pack = result.pack
+        pack_tokens, evidence_tokens = _validate_pack(pack, request, captured, plan, manifest)
+    except ProviderError as error:
+        reason = error.reason_code
+        telemetry.update(error.telemetry)
+    except (OSError, ValueError, UnicodeError, TypeError, AttributeError, KeyError):
+        reason = "invalid_pack"
+    unchanged, snapshot_after = _scope_unchanged(workspace, captured, request["approved_paths"])
     if not unchanged:
         reason = "workspace_mutated"
-    elif execution["outcome"] != "completed":
-        if execution["outcome"] == "timeout":
-            reason = "worker_timeout"
-        elif execution["outcome"] in {"missing_output", "stale_output"}:
-            reason = "invalid_pack"
-        else:
-            reason = "worker_failed"
-    else:
-        reason = ""
-    pack: dict[str, Any] | None = None
-    pack_tokens: int | None = None
-    evidence_tokens: int | None = None
-    if not reason:
-        try:
-            pack = execution["final_message"]
-            pack_tokens, evidence_tokens = _validate_pack(
-                pack, request, captured, workspace, plan, efficiency, scope, manifest
-            )
-            unchanged, snapshot_after = _scope_unchanged(workspace, request, captured, scope)
-            if not unchanged:
-                reason = "workspace_mutated"
-        except (OSError, ValueError, UnicodeError, TypeError, AttributeError, KeyError):
-            reason = "invalid_pack"
-    if reason:
-        receipt = _failure_receipt(
-            metrics, plan, profile, captured, execution, reason, snapshot_after
-        )
-        receipt["orchestration_elapsed_ms"] = int((time.monotonic() - started) * 1000)
-        _write_json_new(artifact_dir / "receipt.json", receipt)
-        try:
-            output_path.unlink()
-        except FileNotFoundError:
-            pass
-        return ({
-            "schema_version": 1,
-            "status": "failed",
-            "route": "native",
-            "reason_code": reason,
-            "native_fallback_recommended": True,
-            "artifacts": {"directory": str(artifact_dir), "receipt": "receipt.json"},
-            "quota_fallback": False,
-        }, 3)
-    if pack is None or pack_tokens is None or evidence_tokens is None or snapshot_after is None:
-        raise ValueError("Accepted EvidencePack state is incomplete")
-    receipt = _success_receipt(
-        metrics, plan, profile, captured, execution, pack, pack_tokens, evidence_tokens,
-        efficiency, manifest, snapshot_after,
-    )
+    receipt = _receipt(metrics, plan, profile, captured, telemetry, reason, snapshot_after,
+                       pack if not reason else None,
+                       pack_tokens if not reason else None, evidence_tokens if not reason else None)
     receipt["orchestration_elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    if reason:
+        _write_json_new(artifact_dir / "receipt.json", receipt)
+        return ({"schema_version": 1, "status": "failed", "route": "native", "reason_code": reason,
+                 "native_fallback_recommended": True, "quota_fallback": False,
+                 "artifacts": {"directory": str(artifact_dir), "receipt": "receipt.json"}}, 3)
     _write_json_new(artifact_dir / "evidence-pack.json", pack)
     _write_json_new(artifact_dir / "receipt.json", receipt)
-    try:
-        output_path.unlink()
-    except FileNotFoundError:
-        pass
-    return ({
-        "schema_version": 1,
-        "status": pack["status"],
-        "route": "free_context_worker",
-        "snapshot": captured.fingerprint,
-        "estimated_raw_tokens": plan["estimated_raw_tokens"],
-        "estimated_evidence_pack_tokens": pack_tokens,
-        "estimated_verification_evidence_tokens": evidence_tokens,
-        "estimated_compact_handoff_tokens": pack_tokens + evidence_tokens,
-        "artifacts": {
-            "directory": str(artifact_dir),
-            "receipt": "receipt.json",
-            "evidence_pack": "evidence-pack.json",
-        },
-        "quota_fallback": False,
-    }, 0)
+    return ({"schema_version": 1, "status": pack["status"], "route": "free_context_worker",
+             "snapshot": captured.fingerprint, "estimated_raw_tokens": plan["estimated_raw_tokens"],
+             "estimated_evidence_pack_tokens": pack_tokens,
+             "estimated_verification_evidence_tokens": evidence_tokens,
+             "estimated_compact_handoff_tokens": pack_tokens + evidence_tokens,
+             "evidence_trust": "untrusted_until_premium_source_verification",
+             "artifacts": {"directory": str(artifact_dir), "receipt": "receipt.json",
+                           "evidence_pack": "evidence-pack.json"}, "quota_fallback": False}, 0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -497,25 +339,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("action", choices=("doctor", "dry-run", "run"))
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--request", type=Path)
-    parser.add_argument("--profile", default="balanced",
-                        choices=("auto", "economy", "balanced", "quality", "max"))
-    parser.add_argument("--codex", type=Path)
+    parser.add_argument("--profile", default="balanced", choices=tuple(sorted(efficiency.PROFILES)))
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
     try:
-        result, code = run_action(
-            args.action, args.workspace, args.request, args.profile,
-            (str(args.codex),) if args.codex else None,
-            args.artifacts, args.timeout,
-        )
+        result, code = run_action(args.action, args.workspace, args.request, args.profile,
+                                  args.artifacts, args.timeout)
         print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False))
         return code
     except (OSError, ValueError, UnicodeError, TypeError, AttributeError, KeyError):
-        print(json.dumps({
-            "error": "ValidationError",
-            "action": "Check the bounded worker inputs and local prerequisites.",
-        }), file=sys.stderr)
+        print(json.dumps({"error": "ValidationError", "route": "native", "quota_fallback": False,
+                          "native_fallback_recommended": True,
+                          "action": "Check the approved scope and local provider configuration."}), file=sys.stderr)
         return 2
 
 

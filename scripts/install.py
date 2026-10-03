@@ -10,11 +10,21 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from scripts.providers.gemini import GeminiProvider
+except ImportError:  # Direct execution still reports a safe unavailable status.
+    GeminiProvider = None  # type: ignore[misc,assignment]
 
 
 PROFILE_IDS = ("economy", "balanced", "quality", "max")
@@ -27,6 +37,10 @@ RUNTIME_FILES = (
     "scripts/codex_exec_adapter.py",
     "scripts/offload_telemetry.py",
     "scripts/free_context_worker.py",
+    "scripts/validate_gemini.py",
+    "scripts/providers/__init__.py",
+    "scripts/providers/base.py",
+    "scripts/providers/gemini.py",
     "integrations/efficiency.json",
     "schemas/evidence-pack.schema.json",
 )
@@ -34,6 +48,34 @@ RUNTIME_FILES = (
 
 class InstallConflict(RuntimeError):
     """Raised when an existing destination differs from the repository asset."""
+
+
+def offload_status() -> dict[str, Any]:
+    """Read Gemini Direct configuration without probing or retaining credentials."""
+
+    unavailable = {
+        "native_status": "READY",
+        "free_context_offload": "NOT CONFIGURED",
+        "provider": "gemini_direct",
+        "model": None,
+        "connectivity_verified": False,
+        "network_requests": 0,
+    }
+    if GeminiProvider is None:
+        return unavailable
+    try:
+        settings = GeminiProvider(environment=os.environ).status()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return unavailable
+    if (not isinstance(settings, dict) or settings.get("provider") != "gemini_direct"
+            or not isinstance(settings.get("configured"), bool)
+            or settings.get("model") is not None and not isinstance(settings.get("model"), str)):
+        return unavailable
+    return {
+        **unavailable,
+        "free_context_offload": "READY" if settings["configured"] else "NOT CONFIGURED",
+        "model": settings["model"],
+    }
 
 
 @dataclass(frozen=True)
@@ -204,6 +246,7 @@ def install(
     manifest_path.chmod(0o600)
     (backup / "manifest.json").write_text(manifest_text, encoding="utf-8")
     (backup / "manifest.json").chmod(0o600)
+    manifest["offload_status"] = offload_status()
     return manifest
 
 
@@ -292,7 +335,8 @@ def main() -> int:
         )
     except InstallConflict as error:
         parser.error(str(error))
-    print(json.dumps({"result": manifest["result"], "backup": manifest["backup"], "files": len(manifest["files"])}, indent=2))
+    print(json.dumps({"result": manifest["result"], "backup": manifest["backup"],
+                      "files": len(manifest["files"]), "offload_status": manifest["offload_status"]}, indent=2))
     return 0
 
 

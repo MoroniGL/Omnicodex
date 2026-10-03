@@ -68,8 +68,8 @@
     "automatic_installation": false
   },
   "token_offload": {
-    "provider": "freellmapi",
-    "model_selector": "auto",
+    "provider": "gemini_direct",
+    "model_selector": "provider_config",
     "read_only_default": true,
     "chars_per_token": 4,
     "supported_tasks": {

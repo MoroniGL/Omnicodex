@@ -32,7 +32,8 @@ def setup(repo: Path, home: Path, skills: Path, *, apply: bool = False,
         defaults.require(current is None or current == item.source.read_bytes() or replace_existing,
                          "asset_conflict_use_replace_existing_after_review")
     result = {"assets": len(items), "preferences": defaults.summary(plan),
-              "mode": "preview", "network_requests": 0, "runtime_verified": False}
+              "mode": "preview", "network_requests": 0, "runtime_verified": False,
+              "offload_status": installer.offload_status()}
     if not apply:
         return result
     # Existing install() remains the asset-only API. Its batch is NOT transactional.

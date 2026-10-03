@@ -23,11 +23,17 @@ REQUEST_FIELDS = {
     "schema_version", "task_kind", "objective", "approved_paths",
     "data_classification", "external_offload_approved", "metrics", "expected_snapshot",
 }
-SENSITIVE_PARTS = {".git", ".ssh", ".aws", ".gnupg"}
+SENSITIVE_PARTS = {".git", ".ssh", ".aws", ".gnupg", ".secrets", ".npmrc", ".netrc", ".pypirc",
+                   ".docker", ".kube", ".azure", ".git-credentials"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".kdbx", ".jks"}
 PRIVATE_KEY_MARKER = b"-----BEGIN "
 CREDENTIAL_ASSIGNMENT = re.compile(
-    rb'''(?im)(?:^|[\s,{])['"]?([a-z_][a-z0-9_-]*)['"]?\s*[:=]\s*['"]?([^\s,}\r\n'"]+)'''
+    rb'''(?im)(?:^|[\s,{/:])['"]?([a-z_][a-z0-9_-]*)['"]?\s*[:=]\s*['"]?([^\s,}\r\n'"]+)'''
+)
+AUTH_SIGNATURE = re.compile(
+    rb"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    rb"AIza[0-9A-Za-z_-]{30,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b|"
+    rb"(?i:machine\s+\S+[\s\S]{0,512}?\b(?:password|account)\s+\S+)"
 )
 REDACTED_VALUES = {b"<redacted>", b"redacted", b"<secret>", b"changeme", b"example"}
 WINDOWS_INVALID_FILENAME_CHARS = frozenset('<>:"|?*')
@@ -83,8 +89,10 @@ def _relative_path_components(value: Any) -> tuple[str, ...]:
                 "Reserved path component")
         require(not lowered.startswith(".env"), "Sensitive path forbidden")
         stem = lowered.rsplit(".", 1)[0]
-        require(stem not in {"private-key", "private_key", "auth", "token", "secret", "api-key",
-                             "api_key", "apikey"} and
+        require(stem not in {"private-key", "private_key", "auth", "token", "tokens", "secret", "secrets",
+                             "api-key", "api_key", "apikey", "api-tokens", "api_tokens", "authorized_keys",
+                             "environment_dump", "environment-dump", "env_dump", "env-dump",
+                             "conversation_history", "conversation-history", "chat_history", "chat-history"} and
                 not any(word in stem for word in ("credential", "password", "passwd")),
                 "Sensitive path forbidden")
     return tuple(part.casefold() for part in parts)
@@ -114,7 +122,8 @@ def validate_worker_request(request: dict[str, Any]) -> None:
     """Validate a bounded request before examining any workspace path."""
     require(isinstance(request, dict) and set(request) <= REQUEST_FIELDS,
             "Unknown worker request field")
-    require(request.get("schema_version") == 1, "Unsupported worker request schema")
+    require(type(request.get("schema_version")) is int and request["schema_version"] == 1,
+            "Unsupported worker request schema")
     efficiency = _efficiency_module()
     require(request.get("task_kind") in efficiency.OFFLOAD_TASKS, "Unknown worker task")
     objective = request.get("objective")
@@ -155,7 +164,7 @@ def validate_endpoint(endpoint: str) -> str:
 
 
 def _contains_sensitive_text(raw: bytes) -> bool:
-    if PRIVATE_KEY_MARKER in raw:
+    if PRIVATE_KEY_MARKER in raw or AUTH_SIGNATURE.search(raw):
         return True
     for match in CREDENTIAL_ASSIGNMENT.finditer(raw):
         key = match.group(1).lower()
@@ -356,6 +365,20 @@ def capture_scope(root: Path, approved_paths: list[str]) -> CapturedScope:
 
 def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
     return [entry.path for entry in capture_scope(root, approved_paths).entries]
+
+
+def validate_captured_references(captured: CapturedScope, evidence: list[dict[str, Any]]) -> None:
+    """Validate ranges solely against immutable approved bytes, with no filesystem access."""
+    _validate_captured_scope(captured)
+    require(isinstance(evidence, list), "Evidence must be a list")
+    lines = {entry.path: len(entry.data.decode("utf-8").splitlines()) for entry in captured.entries}
+    for item in evidence:
+        require(isinstance(item, dict), "Invalid evidence reference")
+        path = item.get("path")
+        require(isinstance(path, str) and path in lines, "Evidence path is outside captured scope")
+        start, end = item.get("start_line"), item.get("end_line")
+        require(type(start) is int and type(end) is int and 1 <= start <= end <= lines[path],
+                "Evidence line range is outside captured source")
 
 
 def fingerprint_scope(root: Path, scope: list[str]) -> str:
