@@ -545,7 +545,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         argv = self.build_argv()
         self.assertEqual(argv[:4], ["codex with spaces", "-a", "never", "exec"])
         self.assertEqual(argv[-1], "-")
-        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+        self.assertNotIn("--sandbox", argv)
         self.assertIn("--ephemeral", argv)
         self.assertIn("--json", argv)
         self.assertIn("--ignore-user-config", argv)
@@ -558,6 +558,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--output-last-message") + 1],
                          str(Path("C:/output dir/last message.json")))
         settings = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
+        stage = str(Path("C:/stage dir").resolve()).replace("\\", "\\\\")
         self.assertEqual(settings, [
             'model_provider="freellmapi"',
             'model_providers.freellmapi.name="FreeLLMAPI"',
@@ -566,6 +567,15 @@ class CodexExecAdapterTests(unittest.TestCase):
             'model_providers.freellmapi.env_key="FREELLMAPI_API_KEY"',
             'model_providers.freellmapi.requires_openai_auth=false',
             'web_search="disabled"',
+            'default_permissions="omnicodex_worker"',
+            'permissions.omnicodex_worker.description="Stage-only read access"',
+            'permissions.omnicodex_worker.filesystem.":root"="deny"',
+            'permissions.omnicodex_worker.filesystem.":minimal"="read"',
+            f'permissions.omnicodex_worker.filesystem."{stage}"="read"',
+            'permissions.omnicodex_worker.network.enabled=false',
+            'features.apps=false',
+            'features.remote_plugin=false',
+            'features.multi_agent=false',
             'shell_environment_policy.ignore_default_excludes=false',
             'shell_environment_policy.exclude=["FREELLMAPI_API_KEY"]',
         ])
@@ -815,13 +825,16 @@ class WorkerOrchestrationTests(unittest.TestCase):
                         "independent_units": 1},
         }
 
+    def large_text(self, marker="public-context-marker"):
+        return marker + "\n" + ("public context line\n" * 4_000)
+
     def test_small_request_returns_native_fallback_without_starting_codex(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "repo"
             root.mkdir()
             (root / "safe.txt").write_text("unique-staged-marker\n", encoding="utf-8")
             request = Path(directory) / "request.json"
-            request.write_text(json.dumps(self.request(100)), encoding="utf-8")
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
             result, code = self.worker().run_action(
                 "dry-run", root, request, "balanced", None, None, 1, environment={}
             )
@@ -834,14 +847,17 @@ class WorkerOrchestrationTests(unittest.TestCase):
             base = Path(directory)
             root = base / "repo"
             root.mkdir()
-            (root / "safe.txt").write_text("unique-staged-marker\n", encoding="utf-8")
+            source_text = self.large_text("unique-staged-marker")
+            source = root / "safe.txt"
+            source.write_text(source_text, encoding="utf-8")
+            source_bytes = source.read_bytes()
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             fake = base / "fake.py"
             fake.write_text(
                 "import json,pathlib,sys\n"
                 "a=sys.argv; stage=pathlib.Path(a[a.index('--cd')+1]); out=pathlib.Path(a[a.index('--output-last-message')+1])\n"
-                "assert (stage/'safe.txt').read_text() == 'unique-staged-marker\\n'\n"
+                "content=(stage/'safe.txt').read_text(); assert content.startswith('unique-staged-marker\\n'); assert len(content) > 48000\n"
                 "assert not (stage/'outside.txt').exists()\n"
                 "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'output_tokens':1,'reasoning_output_tokens':0}}))\n"
                 "out.write_text(json.dumps({'schema_version':1,'status':'completed','task_kind':'repo_scout','snapshot':sys.stdin.read().split('snapshot=')[1].split('\\n')[0],'summary':'unique-staged-marker','relevant_files':['safe.txt'],'findings':[{'claim':'marker','evidence':[{'path':'safe.txt','start_line':1,'end_line':1,'kind':'source'}]}],'risks':[],'unknowns':[],'validation':[]}))\n",
@@ -858,6 +874,11 @@ class WorkerOrchestrationTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(pack["summary"], "unique-staged-marker")
         self.assertEqual(receipt["worker_outcome"], "completed")
+        self.assertEqual(receipt["captured_raw_bytes"], len(source_bytes))
+        self.assertEqual(receipt["estimated_raw_tokens"],
+                         (len(source_bytes) + 3) // 4)
+        self.assertLess(receipt["estimated_compact_handoff_tokens"],
+                        receipt["estimated_raw_tokens"])
         self.assertNotIn("not-in-result", json.dumps(result))
         self.assertNotIn("unique-staged-marker", json.dumps(result))
 
@@ -866,7 +887,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             base = Path(directory)
             root = base / "repo"
             root.mkdir()
-            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             cases = (
@@ -891,7 +912,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             root = base / "repo"
             root.mkdir()
             marker = "raw-marker-never-in-command"
-            (root / "safe.txt").write_text(marker + "\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(marker), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             secret = "worker-key-never-serialized"
@@ -905,14 +926,16 @@ class WorkerOrchestrationTests(unittest.TestCase):
         self.assertRegex(result["snapshot"], r"^[0-9a-f]{64}$")
         self.assertNotIn(secret, rendered)
         self.assertNotIn(marker, rendered)
-        self.assertIn("--sandbox read-only", result["command_preview_posix"])
+        preview = result["command_preview_posix"]
+        self.assertNotIn("--sandbox", preview)
+        self.assertIn("default_permissions", preview)
 
     def test_snapshot_mismatch_and_invalid_endpoint_fail_without_worker(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             root = base / "repo"
             root.mkdir()
-            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(), encoding="utf-8")
             value = self.request()
             value["expected_snapshot"] = "0" * 64
             request = base / "request.json"
@@ -940,7 +963,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             base = Path(directory)
             root = base / "repo"
             root.mkdir()
-            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             environment = {"FREELLMAPI_API_KEY": "configured"}
@@ -964,7 +987,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             root = base / "repo"
             root.mkdir()
             marker = "raw-source-must-stay-local"
-            (root / "safe.txt").write_text(marker + "\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(marker), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             counter = base / "count.txt"
@@ -997,7 +1020,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             root = base / "repo"
             root.mkdir()
             source = root / "safe.txt"
-            source.write_text("before\n", encoding="utf-8")
+            source.write_text(self.large_text("before"), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             fake = base / "slow.py"
@@ -1029,7 +1052,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             base = Path(directory)
             root = base / "repo"
             root.mkdir()
-            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             missing = base / "missing.py"
@@ -1067,7 +1090,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
             base = Path(directory)
             root = base / "repo"
             root.mkdir()
-            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            (root / "safe.txt").write_text(self.large_text(), encoding="utf-8")
             request = base / "request.json"
             request.write_text(json.dumps(self.request()), encoding="utf-8")
             fake = base / "fail.py"
@@ -1096,6 +1119,33 @@ class WorkerOrchestrationTests(unittest.TestCase):
                     self.assertEqual((code, result["reason_code"], result["route"]),
                                      (3, reason, "native"))
                     self.assertTrue(result["native_fallback_recommended"])
+
+    def test_pack_plus_cited_source_must_be_smaller_than_captured_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text(("x" * 128 + "\n") * 400, encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            fake = base / "full-citation.py"
+            fake.write_text(
+                "import json,pathlib,sys\n"
+                "a=sys.argv; p=sys.stdin.read(); s=p.split('snapshot=')[1].split('\\n')[0]\n"
+                "pathlib.Path(a[a.index('--output-last-message')+1]).write_text(json.dumps({'schema_version':1,'status':'completed','task_kind':'repo_scout','snapshot':s,'summary':'not compact','relevant_files':['safe.txt'],'findings':[{'claim':'all','evidence':[{'path':'safe.txt','start_line':1,'end_line':400,'kind':'source'}]}],'risks':[],'unknowns':[],'validation':[]}))\n",
+                encoding="utf-8",
+            )
+            result, code = self.worker().run_action(
+                "run", root, request, "balanced", (sys.executable, str(fake)),
+                base / "artifacts", 2,
+                environment={"FREELLMAPI_API_KEY": "configured"},
+            )
+            receipt = json.loads(
+                (base / "artifacts" / "receipt.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual((code, result["reason_code"], result["route"]),
+                         (3, "invalid_pack", "native"))
+        self.assertIsNone(receipt["estimated_compact_handoff_tokens"])
 
     def test_doctor_reports_local_prerequisites_without_live_claims_or_key(self):
         secret = "doctor-secret"

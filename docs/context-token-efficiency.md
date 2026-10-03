@@ -32,10 +32,10 @@ never a response to OpenAI quota exhaustion.
 ```text
 premium parent
   -> deterministic search/stat/path narrowing
-  -> ContextCostGate
+  -> immutable bounded scope capture
+  -> measured ContextCostGate
      -> small/ineligible: native parent path
      -> large + approved + nonsensitive
-        -> immutable bounded scope capture
         -> private staged copy
         -> one ephemeral read-only Codex exec using FreeLLMAPI
         -> local EvidencePack validation + workspace re-snapshot
@@ -45,14 +45,24 @@ premium parent
 
 The original source bytes are not placed in the prompt. The worker receives the
 task kind, concise objective, approved repo-relative names, snapshot, and pack
-budgets, then reads the staged files itself. `--ephemeral`, `--sandbox read-only`,
-`--output-schema`, JSONL events, `--output-last-message`, and per-invocation
+budgets, then reads the staged files itself. `--ephemeral`, `--output-schema`,
+JSONL events, `--output-last-message`, and per-invocation
 provider overrides isolate the worker without changing global or parent provider
-configuration. Web search is disabled and the staged workspace has no Git state.
+configuration. A strict per-invocation permission profile denies the filesystem
+root, grants only Codex's minimal runtime paths plus the exact staged directory,
+and disables model-initiated network tools. Unsupported configuration fails
+closed because `--strict-config` is used. Web search is disabled and the staged
+workspace has no Git state.
+
+Current Codex permission profiles and the older `--sandbox` flag are mutually
+exclusive. The worker deliberately omits `--sandbox` so the narrower custom
+profile remains active; `-a never` rejects escalation requests.
 
 The local validator rejects unknown fields, wrong task/snapshot, out-of-scope
 files, invalid or missing line evidence, oversized packs, and a changed source
-snapshot. A failed or stale pack is never promoted to evidence.
+snapshot. The final acceptance check counts the UTF-8 bytes in the pack plus the
+union of cited source ranges; that compact handoff must be smaller than the
+captured raw scope. A failed or stale pack is never promoted to evidence.
 
 ## Provider contracts
 
@@ -157,12 +167,20 @@ provider receives it, while the worker's shell environment policy explicitly
 excludes it from model-initiated commands. Provider output is checked for the
 credential before any result is accepted.
 
+Path and content screening is a bounded fail-closed safeguard, not a substitute
+for correct workspace classification. Operators must not approve a scope whose
+sensitivity is uncertain. Detected sensitive names, bytes, links/reparse points,
+binary content, or credentials reject the entire candidate scope.
+
 ## Receipts and failure behavior
 
 Accepted runs write `evidence-pack.json` and `receipt.json` to a fresh private
-directory outside the workspace. Receipts separate `estimated_raw_tokens`,
-`estimated_evidence_pack_tokens`, and `estimated_premium_context_avoided` from
-actual worker input/cached-input/output/reasoning tokens. Served provider/model
+directory outside the workspace. Receipts separate captured raw bytes,
+`estimated_raw_tokens`, `estimated_evidence_pack_tokens`, cited verification
+evidence, the combined compact handoff, and estimated premium context avoided
+from actual worker input/cached-input/output/reasoning tokens. Routing uses the
+captured file count, byte count, and line count; request metrics cannot inflate a
+small scope into an offload. Served provider/model
 and retry/fallback counts remain `null` unless reliable runtime evidence exposes
 them. Root usage is recorded separately when available; billing and subscription
 allowance are always unverified unless measured elsewhere.
@@ -222,3 +240,6 @@ These are upstream documentation observations, not live compatibility results.
 5. [RTK](https://github.com/rtk-ai/rtk) and
    [Caveman](https://github.com/JuliusBrussee/caveman): future integration research
    and brevity inspiration respectively; no benchmark results reused.
+6. [OpenAI Codex permission profiles](https://learn.chatgpt.com/docs/permissions):
+   current profile syntax, filesystem precedence, platform enforcement, and the
+   non-composition rule for the older `--sandbox` settings; checked 2026-10-03.

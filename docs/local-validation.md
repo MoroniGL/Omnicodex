@@ -131,7 +131,15 @@ Get-Content (Join-Path $artifacts 'receipt.json')
 Accept the live test only if the dry run selected `free_context_worker`, the run
 created a locally valid pack, source hashes match, evidence ranges resolve, and
 the receipt reports an accepted single worker run. Confirm the pack is compact
-and contains no full source. Record requested model `auto`; record served
+and contains no full source. Confirm the receipt's combined pack-plus-citations
+estimate is smaller than the captured raw estimate. Review the command preview
+for the stage-only permission profile: root denied, minimal runtime paths and the
+exact temporary stage readable, network disabled, `-a never`, and no `--sandbox`
+flag that would override the permission profile. A controlled gateway acceptance
+must also instruct the worker
+to attempt reading a known synthetic file outside the stage and verify that the
+attempt is denied without exposing that file's contents. Record requested model
+`auto`; record served
 provider/model only when supported runtime evidence—not worker prose—provides
 it. Actual root usage will commonly remain `null`. Never print the environment
 key, and verify the user's global Codex config hash is unchanged.

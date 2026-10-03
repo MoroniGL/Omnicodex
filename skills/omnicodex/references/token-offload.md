@@ -32,16 +32,24 @@ offload merely because quota, rate limits, or allowance are exhausted.
    and `search_hits` from deterministic metadata. Do not load the full candidate
    payload into the parent merely to estimate it.
 3. **Gate.** Create a bounded request and run `dry-run`. This validates the request,
-   captures the approved scope, derives provider availability locally, calculates
-   the profile threshold, and makes zero network requests. Callers never set
-   `provider_available` themselves.
+   captures the approved scope, replaces caller size/count estimates with the
+   actual captured bytes, files, and lines, derives provider availability locally,
+   calculates the profile threshold, and makes zero network requests. Callers
+   never set `provider_available` themselves.
 4. **Invoke once.** Only a `ready` result with route `free_context_worker` permits
    `run`. The runtime stages the immutable approved scope outside the repository
    and starts one isolated, read-only, no-web Codex subprocess with model `auto`.
+   Its strict permission profile denies root access and permits only minimal Codex
+   runtime paths plus that exact staged copy; model-initiated network access and
+   escalation requests are denied. Current Codex treats the older `--sandbox`
+   flag as an override, so the worker intentionally uses the custom profile
+   without that flag.
    Do not retry with another provider or model.
 5. **Validate locally.** Accept output only after schema, task kind, snapshot,
    token budget, captured-file subset, source existence, line bounds, and a second
-   workspace fingerprint check all pass. A failure recommends the native path; it
+   workspace fingerprint check all pass. The UTF-8 pack estimate plus the union of
+   cited source ranges must also be smaller than the captured raw estimate. A
+   failure recommends the native path; it
    does not make untrusted worker prose evidence.
 6. **Open exact evidence.** Read only the cited repo-relative file/line ranges
    needed to verify claims. The EvidencePack summary is a locator, not proof.
@@ -132,7 +140,9 @@ request, command argument, prompt, receipt, or committed file.
   diagnostically and continue natively only when still appropriate. Never accept
   the rejected pack or retry as quota fallback.
 
-The receipt is routing telemetry. `estimated_*` values are estimates;
+The receipt is routing telemetry. It distinguishes captured raw bytes, raw token
+estimate, pack estimate, cited-evidence estimate, and their combined compact
+handoff. `estimated_*` values are estimates;
 `billing_verified`, `subscription_allowance_verified`, and `quota_fallback`
 remain false unless a future independently verified mechanism changes the
 contract. Served provider/model fields are populated only when reliable runtime

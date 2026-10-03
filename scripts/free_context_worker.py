@@ -121,10 +121,25 @@ def _write_json_new(path: Path, value: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
-def _gate(request: dict[str, Any], profile: str, provider_available: bool,
-          efficiency: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _captured_metrics(request: dict[str, Any], captured: Any,
+                      provider_available: bool) -> dict[str, Any]:
     metrics = dict(request["metrics"])
+    total_bytes = sum(len(entry.data) for entry in captured.entries)
+    total_lines = sum(len(entry.data.splitlines()) for entry in captured.entries)
+    metrics.update({
+        "estimated_chars": total_bytes,
+        "file_count": len(captured.entries),
+        "diff_lines": total_lines,
+        "log_bytes": total_bytes,
+    })
     metrics["provider_available"] = provider_available
+    return metrics
+
+
+def _gate(request: dict[str, Any], captured: Any, profile: str,
+          provider_available: bool, efficiency: Any,
+          manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    metrics = _captured_metrics(request, captured, provider_available)
     plan = efficiency.make_offload_plan(manifest, metrics, profile)
     return metrics, plan
 
@@ -161,9 +176,30 @@ def _prompt(request: dict[str, Any], captured: Any, plan: dict[str, Any]) -> str
     )
 
 
+def _verification_evidence_bytes(pack: dict[str, Any], captured: Any) -> int:
+    entries = {entry.path: entry.data.splitlines(keepends=True) for entry in captured.entries}
+    intervals: dict[str, list[tuple[int, int]]] = {}
+    for finding in pack["findings"]:
+        for evidence in finding["evidence"]:
+            intervals.setdefault(evidence["path"], []).append(
+                (evidence["start_line"] - 1, evidence["end_line"])
+            )
+    total = 0
+    for path, ranges in intervals.items():
+        merged: list[list[int]] = []
+        for start, end in sorted(ranges):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        lines = entries[path]
+        total += sum(len(b"".join(lines[start:end])) for start, end in merged)
+    return total
+
+
 def _validate_pack(pack: dict[str, Any], request: dict[str, Any], captured: Any,
                    workspace: Path, plan: dict[str, Any], efficiency: Any,
-                   scope: Any, manifest: dict[str, Any]) -> int:
+                   scope: Any, manifest: dict[str, Any]) -> tuple[int, int]:
     efficiency.validate_evidence_pack(pack)
     if pack["task_kind"] != request["task_kind"] or pack["snapshot"] != captured.fingerprint:
         raise ValueError("EvidencePack identity mismatch")
@@ -175,7 +211,12 @@ def _validate_pack(pack: dict[str, Any], request: dict[str, Any], captured: Any,
     pack_tokens = efficiency.estimate_pack_tokens(manifest, pack)
     if pack_tokens > plan["max_pack_tokens"]:
         raise ValueError("EvidencePack exceeds the profile budget")
-    return pack_tokens
+    divisor = manifest["token_offload"]["chars_per_token"]
+    evidence_bytes = _verification_evidence_bytes(pack, captured)
+    evidence_tokens = (evidence_bytes + divisor - 1) // divisor
+    if pack_tokens + evidence_tokens >= plan["estimated_raw_tokens"]:
+        raise ValueError("Compact handoff would not reduce premium context")
+    return pack_tokens, evidence_tokens
 
 
 def _scope_unchanged(workspace: Path, request: dict[str, Any], captured: Any,
@@ -205,7 +246,10 @@ def _failure_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
         "failure_reason": reason,
         "elapsed_ms": execution.get("elapsed_ms"),
         "estimated_raw_tokens": plan["estimated_raw_tokens"],
+        "captured_raw_bytes": sum(len(entry.data) for entry in captured.entries),
         "estimated_evidence_pack_tokens": None,
+        "estimated_verification_evidence_tokens": None,
+        "estimated_compact_handoff_tokens": None,
         "estimated_premium_context_avoided": None,
         "input_tokens": telemetry.get("input_tokens"),
         "cached_input_tokens": telemetry.get("cached_input_tokens"),
@@ -230,7 +274,8 @@ def _failure_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
 
 def _success_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str,
                      captured: Any, execution: dict[str, Any], pack: dict[str, Any],
-                     pack_tokens: int, efficiency: Any, manifest: dict[str, Any],
+                     pack_tokens: int, evidence_tokens: int,
+                     efficiency: Any, manifest: dict[str, Any],
                      snapshot_after: str) -> dict[str, Any]:
     receipt = efficiency.make_offload_receipt(manifest, metrics, pack, profile)
     telemetry = execution["telemetry"]
@@ -260,6 +305,16 @@ def _success_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
     })
     # Preserve the locally measured value even if receipt internals evolve.
     receipt["estimated_evidence_pack_tokens"] = pack_tokens
+    compact_tokens = pack_tokens + evidence_tokens
+    raw_tokens = plan["estimated_raw_tokens"]
+    avoided = max(0, raw_tokens - compact_tokens)
+    receipt.update({
+        "captured_raw_bytes": sum(len(entry.data) for entry in captured.entries),
+        "estimated_verification_evidence_tokens": evidence_tokens,
+        "estimated_compact_handoff_tokens": compact_tokens,
+        "estimated_premium_context_avoided": avoided,
+        "estimated_reduction_fraction": round(avoided / raw_tokens, 4) if raw_tokens else 0.0,
+    })
     return receipt
 
 
@@ -309,11 +364,13 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
             "quota_fallback": False,
         }, 3)
     provider_available = key_configured and prefix is not None
-    metrics, plan = _gate(request, profile, provider_available, efficiency, manifest)
+    metrics, plan = _gate(
+        request, captured, profile, provider_available, efficiency, manifest
+    )
     if not provider_available:
         # Preserve the cost-gate reason for genuinely small work while still
         # recording real provider availability in the production plan.
-        _, eligible_plan = _gate(request, profile, True, efficiency, manifest)
+        _, eligible_plan = _gate(request, captured, profile, True, efficiency, manifest)
         if eligible_plan["route"] != "free_context_worker":
             return _fallback(eligible_plan), 0
         missing = "missing_key" if not key_configured else "codex_unavailable"
@@ -373,10 +430,11 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
         reason = ""
     pack: dict[str, Any] | None = None
     pack_tokens: int | None = None
+    evidence_tokens: int | None = None
     if not reason:
         try:
             pack = execution["final_message"]
-            pack_tokens = _validate_pack(
+            pack_tokens, evidence_tokens = _validate_pack(
                 pack, request, captured, workspace, plan, efficiency, scope, manifest
             )
             unchanged, snapshot_after = _scope_unchanged(workspace, request, captured, scope)
@@ -403,10 +461,10 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
             "artifacts": {"directory": str(artifact_dir), "receipt": "receipt.json"},
             "quota_fallback": False,
         }, 3)
-    if pack is None or pack_tokens is None or snapshot_after is None:
+    if pack is None or pack_tokens is None or evidence_tokens is None or snapshot_after is None:
         raise ValueError("Accepted EvidencePack state is incomplete")
     receipt = _success_receipt(
-        metrics, plan, profile, captured, execution, pack, pack_tokens,
+        metrics, plan, profile, captured, execution, pack, pack_tokens, evidence_tokens,
         efficiency, manifest, snapshot_after,
     )
     receipt["orchestration_elapsed_ms"] = int((time.monotonic() - started) * 1000)
@@ -423,6 +481,8 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
         "snapshot": captured.fingerprint,
         "estimated_raw_tokens": plan["estimated_raw_tokens"],
         "estimated_evidence_pack_tokens": pack_tokens,
+        "estimated_verification_evidence_tokens": evidence_tokens,
+        "estimated_compact_handoff_tokens": pack_tokens + evidence_tokens,
         "artifacts": {
             "directory": str(artifact_dir),
             "receipt": "receipt.json",

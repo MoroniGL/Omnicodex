@@ -317,9 +317,10 @@ def validate_evidence_pack(pack: dict[str, Any]) -> None:
 def estimate_pack_tokens(manifest: dict[str, Any], pack: dict[str, Any]) -> int:
     validate_evidence_pack(pack)
     raw = json.dumps(pack, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    require(len(raw.encode("utf-8")) <= MAX_PACK_BYTES, "EvidencePack too large")
+    raw_bytes = raw.encode("utf-8")
+    require(len(raw_bytes) <= MAX_PACK_BYTES, "EvidencePack too large")
     divisor = manifest["token_offload"]["chars_per_token"]
-    return (len(raw) + divisor - 1) // divisor
+    return (len(raw_bytes) + divisor - 1) // divisor
 
 
 def make_offload_receipt(manifest: dict[str, Any], metrics: dict[str, Any],

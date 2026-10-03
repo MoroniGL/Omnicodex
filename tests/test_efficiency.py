@@ -248,6 +248,13 @@ class EfficiencyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             efficiency.validate_evidence_pack(bad)
 
+    def test_pack_token_estimate_counts_utf8_bytes(self):
+        pack = self.evidence_pack()
+        pack["summary"] = "🙂" * 20
+        raw = json.dumps(pack, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        expected = (len(raw.encode("utf-8")) + 3) // 4
+        self.assertEqual(efficiency.estimate_pack_tokens(self.manifest, pack), expected)
+
     def test_offload_receipt_estimates_avoided_context_not_billing(self):
         result = efficiency.make_offload_receipt(
             self.manifest, self.offload_metrics(), self.evidence_pack(), "balanced"

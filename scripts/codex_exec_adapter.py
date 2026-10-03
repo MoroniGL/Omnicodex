@@ -48,6 +48,7 @@ def build_codex_exec_argv(executable_prefix: Sequence[str], staged_workspace: Pa
     base_url = _scope_module().validate_endpoint(
         DEFAULT_BASE_URL if endpoint is None else endpoint
     )
+    stage = _toml_string(str(staged_workspace.resolve()))
     settings = (
         'model_provider="freellmapi"',
         'model_providers.freellmapi.name="FreeLLMAPI"',
@@ -56,10 +57,21 @@ def build_codex_exec_argv(executable_prefix: Sequence[str], staged_workspace: Pa
         'model_providers.freellmapi.env_key="FREELLMAPI_API_KEY"',
         'model_providers.freellmapi.requires_openai_auth=false',
         'web_search="disabled"',
+        'default_permissions="omnicodex_worker"',
+        'permissions.omnicodex_worker.description="Stage-only read access"',
+        'permissions.omnicodex_worker.filesystem.":root"="deny"',
+        'permissions.omnicodex_worker.filesystem.":minimal"="read"',
+        f'permissions.omnicodex_worker.filesystem.{stage}="read"',
+        'permissions.omnicodex_worker.network.enabled=false',
+        'features.apps=false',
+        'features.remote_plugin=false',
+        'features.multi_agent=false',
         'shell_environment_policy.ignore_default_excludes=false',
         'shell_environment_policy.exclude=["FREELLMAPI_API_KEY"]',
     )
-    argv = list(executable_prefix) + ["-a", "never", "exec", "--ephemeral", "--sandbox", "read-only"]
+    # Permission profiles and --sandbox are mutually exclusive in current Codex.
+    # Passing --sandbox would silently select the older, broader sandbox policy.
+    argv = list(executable_prefix) + ["-a", "never", "exec", "--ephemeral"]
     for setting in settings:
         argv.extend(("-c", setting))
     argv.extend(("--output-schema", str(output_schema), "--json", "--output-last-message",

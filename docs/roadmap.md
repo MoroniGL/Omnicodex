@@ -57,6 +57,8 @@ OmniCodex will not silently depend on undocumented model-switching behavior.
 - [x] Connect an optional read-only FreeLLMAPI Codex worker using the existing Responses integration.
 - [x] Prove offline that the worker reads a bounded staged workspace directly rather than receiving source in its prompt.
 - [x] Record requested route, worker usage when exposed, latency, failures, and local validation status.
+- [x] Gate on captured scope metrics and enforce pack-plus-citations context reduction.
+- [x] Apply a strict stage-only Codex permission profile to the live worker invocation.
 - [ ] Verify served model/provider, root usage, and acceptance quality in controlled live benchmarks.
 - [ ] Tune thresholds from representative Windows benchmarks.
 - [ ] Evaluate GPT-6.1 Sol / GPT-6 Luna profile migrations separately from the offload worker.
