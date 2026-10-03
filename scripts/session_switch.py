@@ -123,6 +123,22 @@ def recommendation(home: Path, profile: str) -> dict[str, str]:
         result[key] = value
     return result
 
+
+def gemini_offload_status() -> dict[str, Any]:
+    """Return local Gemini Direct configuration without treating it as reachability."""
+
+    try:
+        from scripts.providers.gemini import GeminiProvider
+        status = GeminiProvider(environment=os.environ).status()
+    except (ImportError, OSError, ValueError, TypeError, AttributeError):
+        return {"provider": "gemini_direct", "model": None, "configured": False}
+    if (not isinstance(status, dict) or status.get("provider") != "gemini_direct"
+            or not isinstance(status.get("configured"), bool)
+            or status.get("model") is not None and not isinstance(status.get("model"), str)):
+        return {"provider": "gemini_direct", "model": None, "configured": False}
+    return {"provider": "gemini_direct", "model": status["model"],
+            "configured": status["configured"]}
+
 def session_key(session_id: str) -> str:
     require(isinstance(session_id, str) and 1 <= len(session_id) <= 512, "invalid_session_id")
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
@@ -322,6 +338,14 @@ def context_for(home: Path, state: dict[str, Any] | None, *,
     if command:
         action = command["action"]
         if action == "status":
+            offload = gemini_offload_status()
+            lines.extend((
+                "- Native path: READY.",
+                "- Gemini Direct offload: " +
+                ("READY" if offload["configured"] else "NOT CONFIGURED") +
+                f" (provider: {offload['provider']}; model: {offload['model'] or 'unconfigured'}).",
+                "- Gemini Direct READY means local configuration only; connectivity was not probed.",
+            ))
             lines.append("- The current user message asks only for Omni session status; answer concisely from this context.")
         elif action == "reset":
             lines.append("- The current user message cleared the temporary override; use the saved policy from this turn onward.")
@@ -404,6 +428,7 @@ def _read_stdin() -> dict[str, Any]:
 def doctor(home: Path | None = None) -> dict[str, Any]:
     home = absolute(home or default_home())
     enabled, profile = saved_profile(home)
+    offload = gemini_offload_status()
     profiles = {}
     for name in PROFILES:
         if name == "auto":
@@ -419,6 +444,13 @@ def doctor(home: Path | None = None) -> dict[str, Any]:
         "profiles": profiles,
         "network_requests": 0,
         "model_switch_performed": False,
+        "native_status": "READY",
+        "free_context_offload": {
+            "status": "READY" if offload["configured"] else "NOT CONFIGURED",
+            "provider": offload["provider"],
+            "model": offload["model"],
+            "connectivity_verified": False,
+        },
         "note": "Session policy switching is hook-driven; model changes remain native /model actions.",
     }
 

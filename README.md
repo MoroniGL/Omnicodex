@@ -40,8 +40,9 @@ python3 -m unittest discover -s tests -v
 python3 scripts/install.py
 ```
 
-The installer installs four namespaced profiles, seven custom agents, and both
-routing-skill files, including `references/efficiency.md`. It checks conflicts
+The installer installs four namespaced profiles, seven custom agents, the
+progressive-disclosure routing skill, and the optional token-offload runtime
+under `$CODEX_HOME/omnicodex/`. It checks conflicts
 before writing, creates a private backup, records asset hashes, and preserves the
 base `config.toml`. After reviewing an update, explicitly allow replacement with:
 
@@ -52,6 +53,11 @@ python3 scripts/install.py --replace-existing
 This installs OmniCodex assets only. It does not install or register optional MCP
 servers, change hooks, or switch the model of an already-running conversation.
 Review [installation and rollback](docs/local-validation.md) before replacing files.
+
+Native OmniCodex installs and works without a Gemini key. There is no WSL,
+Ubuntu, Docker, FreeLLMAPI Desktop, or second Codex installation requirement.
+Gemini Direct offload is optional; missing configuration reports `NOT CONFIGURED`
+and leaves native routing available.
 
 Start a **new CLI session**:
 
@@ -92,6 +98,39 @@ supplied evidence. Neither proves live MCP access or changes a model.
 Read the [efficiency architecture](docs/context-token-efficiency.md) and
 [benchmark protocol](docs/efficiency-benchmark.md).
 
+### Optional Gemini Direct context worker
+
+For an explicitly approved public or private workspace, OmniCodex can send an
+immutable bounded capture to Gemini Direct over HTTPS and receive a source-linked
+EvidencePack. The premium parent still owns planning, implementation,
+consequential decisions, evidence inspection, and acceptance.
+
+This is not quota fallback. Small tasks stay native, sensitive content is
+rejected, and the parent is never switched. Setup is environment only:
+
+```sh
+export GEMINI_API_KEY='set-locally-never-commit'
+# Optional; defaults to gemini-3.5-flash-lite
+export OMNICODEX_GEMINI_MODEL='gemini-3.5-flash-lite'
+python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
+```
+
+`doctor` is offline: its JSON reports `native_status: "READY"` and
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, plus provider/model
+configuration. It does not probe connectivity or verify a served model. A
+configured key is local configuration only. See the
+[architecture and privacy contract](docs/context-token-efficiency.md) and the
+[controlled acceptance procedure](docs/local-validation.md).
+
+`omni status` includes the same offline Gemini Direct configuration distinction.
+It does not claim the optional worker is connected or live.
+
+`python scripts/validate_gemini.py` is the explicit live acceptance command. It
+makes two requests only when local status is READY: a small connectivity probe
+that leaves ordinary small work native, and a roughly 45k-token synthetic gate
+case. No live Gemini result is claimed in this repository; READY is local
+configuration only.
+
 ## Validation and limitations
 
 - The maintainer reported 26 passing efficiency tests on macOS with Python 3.12.14.
@@ -106,6 +145,9 @@ Read the [efficiency architecture](docs/context-token-efficiency.md) and
 - Context Mode and codebase-memory-mcp were not configured in the latest Mac test.
   Live integration, quality comparisons, token/allowance savings, and cross-client
   compatibility remain unverified. No new Max/Astra probe is part of this release preparation.
+- The Gemini Direct worker has comprehensive offline coverage. A real provider
+  test must only be claimed when a configured key and connectivity validation ran;
+  estimated context reduction is not verified billing or subscription savings.
 - RTK automatic rewriting, persistent project memory, and automatic MCP setup are
   not implemented. Claude Code cannot use these Codex model/profile files as-is.
 

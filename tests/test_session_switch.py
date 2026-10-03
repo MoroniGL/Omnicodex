@@ -97,6 +97,25 @@ class SessionSwitchTests(unittest.TestCase):
         self.assertIn("Saved persistent policy: balanced", context)
         self.assertIsNone(s.load_session(self.home, "thr-a"))
 
+    def test_status_reports_offline_native_and_unconfigured_gemini_paths(self):
+        with patch.dict("os.environ", {}, clear=True):
+            result = s.process(self.payload("omni status"), home=self.home)
+        context = self.context(result)
+        self.assertIn("Native path: READY", context)
+        self.assertIn("Gemini Direct offload: NOT CONFIGURED", context)
+        self.assertIn("connectivity was not probed", context)
+
+    def test_status_reports_configured_gemini_model_without_connectivity_claim(self):
+        with patch.dict("os.environ", {
+            "GEMINI_API_KEY": "test-key-only",
+            "OMNICODEX_GEMINI_MODEL": "gemini-2.5-flash-lite",
+        }, clear=True):
+            result = s.process(self.payload("omni status"), home=self.home)
+        context = self.context(result)
+        self.assertIn("Gemini Direct offload: READY", context)
+        self.assertIn("provider: gemini_direct; model: gemini-2.5-flash-lite", context)
+        self.assertNotIn("test-key-only", context)
+
     def test_save_persists_inside_trusted_hook_and_clears_pending(self):
         def persist(home, profile):
             (home / "omnicodex/preferences.json").write_text(

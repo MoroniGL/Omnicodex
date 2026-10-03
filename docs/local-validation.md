@@ -9,6 +9,9 @@ Validated with Codex CLI **0.153.4** on macOS. This is a routing smoke test, not
 | `agents/*.toml` | `$CODEX_HOME/agents/*.toml` (default `~/.codex/agents/`) |
 | `profiles/*.config.toml` | `$CODEX_HOME/omnicodex-<profile>.config.toml` |
 | `skills/omnicodex/SKILL.md` | `~/.agents/skills/omnicodex/SKILL.md` |
+| Token-offload runtime scripts and Gemini provider package | `$CODEX_HOME/omnicodex/scripts/` |
+| `integrations/efficiency.json` | `$CODEX_HOME/omnicodex/integrations/efficiency.json` |
+| `schemas/evidence-pack.schema.json` | `$CODEX_HOME/omnicodex/schemas/evidence-pack.schema.json` |
 
 Run `python3 scripts/install.py`. Before writing, the installer backs up the existing `config.toml` and any destination files to a private, timestamped directory. It refuses conflicting destinations instead of overwriting them unless a reviewed update explicitly uses `--replace-existing`. It records hashes and whether each destination already existed. The seven agent definitions use the supported standalone schema (`name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`). The routing skill needs YAML `name` and `description` frontmatter to be discoverable.
 
@@ -69,3 +72,154 @@ CI validates declarative assets and checks whitespace against the changed commit
 For rollback, remove only files introduced by this installation whose current hashes still match the install manifest. Restore backed-up files only if they were actually replaced. Preserve subsequent user edits and unrelated configuration. Since this procedure leaves the base `config.toml` unchanged, restoring it is unnecessary unless it was separately changed.
 
 Official references: [Custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents) and [configuration samples](https://developers.openai.com/codex/config-sample).
+
+## Gemini Direct worker validation
+
+Windows offline refactor validation on 2026-10-03 passed 244 unit tests, including
+65 direct-provider/worker/mocked-live tests, 23 installer/setup tests, 114
+routing/profile tests, and 42 retained scope/legacy-adapter tests. `compileall`,
+manifest/example-pack validation, and `git diff --check` passed. Independent
+review accepted the implementation after fixing privacy, parser, telemetry,
+deadline-reader, and HTTP connection-lifecycle regressions. No real Gemini call
+was made: this executor had no configured key. The project-specified
+`npx @Codex-flow/cli@latest security scan` could not run because npm rejects that
+package name and returned 404; the security regression suite and independent
+review provide the available local evidence.
+
+Credential and instruction scans are heuristic, so explicit scope approval,
+correct classification, and premium source verification remain required. The
+HTTP response reader refreshes the remaining deadline before each socket read;
+OS DNS and connection/TLS setup retain platform blocking behavior and may exceed
+an exact whole-operation deadline.
+
+The worker calls Gemini Direct from a deterministic immutable capture. It does
+not replace the root provider or write credentials/provider configuration to
+disk. First verify offline prerequisites:
+
+```powershell
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
+$worker = Join-Path $codexHome 'omnicodex\scripts\free_context_worker.py'
+python $worker doctor
+```
+
+The report must show `native_status: "READY"` and
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, along with
+`gemini_direct`, the configured model, `key_configured`, and
+`connectivity_verified: false`. READY means the local environment is configured;
+it does not prove a network request or account access.
+
+For a controlled Windows acceptance, set `GEMINI_API_KEY` in the current shell.
+Optionally set `OMNICODEX_GEMINI_MODEL`; it defaults to `gemini-3.5-flash-lite`.
+Then run the repository validation script, which sends a small EvidencePack case
+and a roughly 45k-token synthetic case:
+
+```powershell
+python scripts/validate_gemini.py
+```
+
+It reports estimates separately from actual provider usage, which appears only
+when Gemini returns usage metadata. The command may incur API billing; a model
+name does not guarantee that the account has a free tier. The test uses only its
+synthetic approved workspace and never reads unapproved files.
+
+On probe failure, `provider_diagnostics` reports the HTTP status and recognized
+API status/reason codes, or a fixed transport category such as `tls_error` or
+`dns_error`. It never includes raw response messages, headers, error metadata,
+exception text, or the key. Unknown diagnostic codes are omitted. Configuration
+READY still does not mean connectivity has been verified.
+
+For rejected HTTP 200 output, fixed `provider_output_issue` and recognized
+`provider_finish_reason` codes identify the parsing stage and completion state.
+Documented text-part `thought` and `thoughtSignature` metadata are accepted;
+reasoning parts and signatures are discarded before the EvidencePack handoff.
+Tool parts, malformed metadata, truncated output, and invalid packs still fail.
+Array bounds are omitted from the API schema to avoid the observed HTTP 400;
+the canonical local validator continues enforcing every array limit.
+
+The real-task worker also emits `diagnostics` in its failure result and receipt.
+Fixed `pack_validation_issue` codes distinguish schema, task/snapshot identity,
+approved-path/citation, operational-instruction, budget, and handoff-reduction
+rejections. Recognized `pack_schema_issue` codes identify the failed schema rule.
+Provider parsing/HTTP codes are retained when available. Rejected packs and raw
+exception messages are never written to disk or included in diagnostics.
+
+Local acceptance verifies shape, bounds, identity, and budgets; it cannot prove
+that cited text supports a claim. The provider receives per-file line labels,
+but the parent must still verify every exact cited range. Reject unsupported
+claims and do not treat a model's `validation: passed` assertion as execution
+evidence: Gemini has no capability to run the tests.
+
+For HTTP request errors, `provider_error_hints` contains only fixed labels for
+terms in the provider message, such as `schema_enum`, `schema_complexity`,
+`json_schema`, or `api_key`. These are lexical hints, not a verified diagnosis.
+No message excerpt is returned; unknown terms and oversized messages are omitted.
+
+For an unexplained HTTP 400, explicitly compare synthetic request variants:
+
+```powershell
+python scripts/validate_gemini.py --diagnose-request --timeout 30
+```
+
+This sends up to four small requests with identical model, task, captured data,
+and token settings: full schema with canonical array bounds explicitly restored;
+minimal schema; full schema without array
+bounds; and the same minimal schema using the current documented `responseFormat`
+field. It stops on authentication, quota, credential, timeout, or transport errors.
+It reports only HTTP outcomes and safe error codes; responses are discarded.
+`diagnostic_complete` means the diagnostic ran, while `acceptance_verified` stays
+false. No production schema, model, or fallback policy is changed. Rerun normal
+acceptance after any confirmed provider compatibility fix.
+
+HTTP 404 / `NOT_FOUND` for `gemini-2.5-flash-lite` can reflect model access:
+[Google limits Gemini 2.5 access to existing users](https://ai.google.dev/gemini-api/docs/deprecations)
+and recommends `gemini-3.5-flash-lite` for new projects (checked 2026-10-03).
+This is the current default; an explicit model override remains supported.
+Use the project's available models and API billing tier, rather than a Gemini
+application subscription name, to assess account access. Never switch models
+automatically after a failed request.
+
+For manual investigation, create a disposable workspace and request outside it:
+
+```powershell
+$case = Join-Path ([IO.Path]::GetTempPath()) ('omnicodex-live-' + [guid]::NewGuid())
+$workspace = Join-Path $case 'workspace'
+$artifacts = Join-Path $case 'artifacts'
+New-Item -ItemType Directory -Path $workspace | Out-Null
+1..5000 | ForEach-Object { "synthetic public evidence line $_" } |
+  Set-Content -Encoding utf8 (Join-Path $workspace 'evidence.txt')
+$request = @{
+  schema_version = 1; task_kind = 'long_doc_digest';
+  objective = 'Summarize the synthetic numbered evidence and cite exact lines.';
+  approved_paths = @('evidence.txt'); data_classification = 'public';
+  external_offload_approved = $true;
+  metrics = @{ schema_version = 1; task_kind = 'long_doc_digest';
+    estimated_chars = 160000; file_count = 1; diff_lines = 0;
+    log_bytes = 0; search_hits = 1; data_classification = 'public';
+    external_offload_approved = $true; independent_units = 1 }
+} | ConvertTo-Json -Depth 4
+$requestPath = Join-Path $case 'request.json'
+[IO.File]::WriteAllText($requestPath, $request, [Text.UTF8Encoding]::new($false))
+$before = (Get-FileHash (Join-Path $workspace 'evidence.txt')).Hash
+$config = Join-Path $codexHome 'config.toml'
+$configBefore = if (Test-Path $config) { (Get-FileHash $config).Hash } else { $null }
+python $worker dry-run --workspace $workspace --request $requestPath --profile balanced
+python $worker run --workspace $workspace --request $requestPath --profile balanced --artifacts $artifacts
+$after = (Get-FileHash (Join-Path $workspace 'evidence.txt')).Hash
+if ($before -ne $after) { throw 'workspace changed' }
+$configAfter = if (Test-Path $config) { (Get-FileHash $config).Hash } else { $null }
+if ($configBefore -ne $configAfter) { throw 'global Codex config changed' }
+python (Join-Path $codexHome 'omnicodex\scripts\efficiency.py') validate-pack `
+  --pack (Join-Path $artifacts 'evidence-pack.json')
+Get-Content (Join-Path $artifacts 'receipt.json')
+```
+
+Accept the live test only if the dry run selected `free_context_worker`, the run
+created a locally valid pack, source hashes match, evidence ranges resolve, and
+the receipt reports one accepted Gemini Direct request. Confirm the pack is
+compact and contains no full source. Confirm the receipt's combined
+pack-plus-citations estimate retains at least a 20% estimated reduction from the
+captured raw estimate. Record
+requested and served provider/model only when direct provider metadata provides
+them. Never print the environment key. The worker only captures the explicitly
+approved scope, so the validation must not rely on access to any other workspace
+file.

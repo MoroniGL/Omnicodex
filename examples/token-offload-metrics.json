@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "task_kind": "repo_scout",
+  "estimated_chars": 120000,
+  "file_count": 36,
+  "diff_lines": 0,
+  "log_bytes": 0,
+  "search_hits": 140,
+  "data_classification": "public",
+  "external_offload_approved": true,
+  "provider_available": true,
+  "independent_units": 4
+}

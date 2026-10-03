@@ -160,22 +160,33 @@ class DefaultsTests(unittest.TestCase):
 
     def test_symlink_home_refused(self):
         link = self.root / "linked-home"
-        try:
-            link.symlink_to(self.home, target_is_directory=True)
-        except OSError:
-            self.skipTest("Host does not allow creating symlinks")
-        with self.assertRaisesRegex(d.DefaultsError, "symlink"):
-            d.build_plan(link, skills_home=self.skills)
+        real_lstat = Path.lstat
+        from types import SimpleNamespace
+        symlink = SimpleNamespace(st_mode=stat_mode_symlink(), st_file_attributes=0)
+        with patch.object(
+            Path,
+            "lstat",
+            autospec=True,
+            side_effect=lambda path: symlink if path == link else real_lstat(path),
+        ):
+            with self.assertRaisesRegex(d.DefaultsError, "symlink"):
+                d.build_plan(link, skills_home=self.skills)
 
     def test_symlink_guidance_refused_before_writes(self):
         outside = self.root / "outside"
         outside.write_text("sentinel")
-        try:
-            (self.home / "AGENTS.md").symlink_to(outside)
-        except OSError:
-            self.skipTest("Host does not allow creating symlinks")
-        with self.assertRaises(d.DefaultsError):
-            self.plan()
+        guidance = self.home / "AGENTS.md"
+        real_lstat = Path.lstat
+        from types import SimpleNamespace
+        symlink = SimpleNamespace(st_mode=stat_mode_symlink(), st_file_attributes=0)
+        with patch.object(
+            Path,
+            "lstat",
+            autospec=True,
+            side_effect=lambda path: symlink if path == guidance else real_lstat(path),
+        ):
+            with self.assertRaises(d.DefaultsError):
+                self.plan()
         self.assertEqual(outside.read_text(), "sentinel")
         self.assertFalse(d.state_path(self.home).exists())
 
@@ -335,6 +346,11 @@ class DefaultsTests(unittest.TestCase):
 def stat_mode_directory():
     import stat
     return stat.S_IFDIR | 0o700
+
+
+def stat_mode_symlink():
+    import stat
+    return stat.S_IFLNK | 0o777
 
 
 if __name__ == "__main__":
