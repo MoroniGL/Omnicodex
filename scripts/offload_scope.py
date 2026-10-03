@@ -274,6 +274,42 @@ def _fingerprint_entries(entries: tuple[CapturedEntry, ...]) -> str:
     return digest.hexdigest()
 
 
+def _validate_captured_scope(captured: Any) -> None:
+    """Reject caller-forged captured values before staging mutates the filesystem."""
+    require(type(captured) is CapturedScope, "Invalid captured scope")
+    require(type(captured.entries) is tuple and 1 <= len(captured.entries) <= MAX_FILES,
+            "Invalid captured entries")
+    require(type(captured.fingerprint) is str, "Invalid captured fingerprint")
+
+    paths: list[str] = []
+    total = 0
+    for entry in captured.entries:
+        require(type(entry) is CapturedEntry, "Invalid captured entry")
+        require(type(entry.path) is str, "Invalid captured path")
+        path = _relative_path(entry.path)
+        try:
+            path.encode("utf-8")
+        except UnicodeError as error:
+            raise ValueError("Invalid captured path") from error
+        require(Path(path).suffix.casefold() not in SENSITIVE_SUFFIXES,
+                "Sensitive path forbidden")
+        require(type(entry.data) is bytes, "Invalid captured bytes")
+        require(len(entry.data) <= MAX_FILE_BYTES, "Captured file exceeds size limit")
+        total += len(entry.data)
+        require(total <= MAX_TOTAL_BYTES, "Captured scope exceeds size limit")
+        require(b"\x00" not in entry.data and not _contains_sensitive_text(entry.data),
+                "Captured file is binary or sensitive")
+        require(type(entry.digest) is str and
+                entry.digest == hashlib.sha256(entry.data).hexdigest(),
+                "Captured entry digest mismatch")
+        paths.append(path)
+
+    require(paths == sorted(paths) and len(paths) == len(set(paths)),
+            "Captured paths must be unique and sorted")
+    require(captured.fingerprint == _fingerprint_entries(captured.entries),
+            "Captured scope fingerprint mismatch")
+
+
 def capture_scope(root: Path, approved_paths: list[str]) -> CapturedScope:
     """Capture one bounded, verified immutable view of the approved source files."""
     paths = _collect_approved_scope(root, approved_paths)
@@ -298,7 +334,7 @@ def fingerprint_scope(root: Path, scope: list[str]) -> str:
 
 def stage_captured_scope(captured: CapturedScope, parent: Path) -> tuple[Path, CapturedScope]:
     """Create a random private stage below parent and verify its actual bytes."""
-    require(isinstance(captured, CapturedScope) and captured.entries, "Invalid captured scope")
+    _validate_captured_scope(captured)
     require(isinstance(parent, Path) and parent.is_dir(), "Invalid staging parent")
     for ancestor in reversed(parent.parents):
         require(not _is_link_or_reparse(ancestor.lstat()), "Staging parent is a link")
@@ -329,17 +365,6 @@ def stage_captured_scope(captured: CapturedScope, parent: Path) -> tuple[Path, C
     actual = capture_scope(stage, [entry.path for entry in captured.entries])
     require(actual.fingerprint == captured.fingerprint, "Staged files do not match approved snapshot")
     return stage, actual
-
-
-def stage_scope(root: Path, scope: list[str], destination: Path,
-                expected_snapshot: str | None = None) -> list[str]:
-    """Compatibility wrapper; callers needing the stage path use stage_captured_scope."""
-    captured = capture_scope(root, scope)
-    if expected_snapshot is not None:
-        require(captured.fingerprint == expected_snapshot, "Approved workspace snapshot changed")
-    require(not destination.exists(), "Staging destination must be newly created")
-    stage_captured_scope(captured, destination.parent)
-    return [entry.path for entry in captured.entries]
 
 
 def validate_evidence_references(root: Path, original_scope: list[str], evidence: list[dict[str, Any]]) -> None:

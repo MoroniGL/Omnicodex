@@ -1,4 +1,5 @@
 """Safety contract tests for bounded FreeLLMAPI worker inputs."""
+import hashlib
 import importlib.util
 import tempfile
 import unittest
@@ -209,36 +210,30 @@ class FreeContextWorkerTests(unittest.TestCase):
             self.assertTrue(requests)
             self.assertLessEqual(max(requests), 4)
 
-    def test_staging_preserves_relative_names_and_refuses_changed_snapshot(self):
+    def test_staging_preserves_relative_names_and_captured_bytes(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
             root = Path(directory)
-            destination = Path(staging) / "view"
             (root / "safe").mkdir()
             path = root / "safe" / "ok.txt"
             path.write_text("safe text\n", encoding="utf-8")
             scope = offload_scope.expand_approved_scope(root, ["safe"])
-            snapshot = offload_scope.fingerprint_scope(root, scope)
             captured = offload_scope.capture_scope(root, scope)
+            path.write_text("changed\n", encoding="utf-8")
             stage, _ = offload_scope.stage_captured_scope(captured, Path(staging))
             staged = [entry.path for entry in captured.entries]
             self.assertEqual(staged, ["safe/ok.txt"])
             self.assertEqual((stage / "safe" / "ok.txt").read_text(encoding="utf-8"), "safe text\n")
-            path.write_text("changed\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
-                offload_scope.stage_scope(root, scope, destination, snapshot)
 
     def test_staging_rejects_mutation_to_sensitive_content_and_matches_snapshot(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
             root = Path(directory)
-            destination = Path(staging) / "view"
             (root / "safe").mkdir()
             source = root / "safe" / "ok.txt"
             source.write_text("safe\n", encoding="utf-8")
             scope = offload_scope.expand_approved_scope(root, ["safe"])
-            snapshot = offload_scope.fingerprint_scope(root, scope)
             source.write_text('"api_key": "live-secret-value"\n', encoding="utf-8")
             with self.assertRaises(ValueError):
-                offload_scope.stage_scope(root, scope, destination, snapshot)
+                offload_scope.capture_scope(root, scope)
             source.write_text("safe again\n", encoding="utf-8")
             snapshot = offload_scope.fingerprint_scope(root, scope)
             captured = offload_scope.capture_scope(root, scope)
@@ -249,29 +244,24 @@ class FreeContextWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging, \
                 tempfile.TemporaryDirectory() as outside:
             root = Path(directory)
-            destination = Path(staging)
             (root / "safe").mkdir()
             (root / "safe" / "ok.txt").write_text("safe\n", encoding="utf-8")
-            scope = offload_scope.expand_approved_scope(root, ["safe"])
+            captured = offload_scope.capture_scope(root, ["safe"])
+            destination = Path(staging) / "link"
             try:
-                (destination / "safe").symlink_to(Path(outside), target_is_directory=True)
+                destination.symlink_to(Path(outside), target_is_directory=True)
             except OSError:
                 self.skipTest("Host does not allow creating symlinks")
             with self.assertRaises(ValueError):
-                offload_scope.stage_scope(root, scope, destination)
+                offload_scope.stage_captured_scope(captured, destination)
 
-    def test_staging_requires_a_nonexisting_destination_and_writes_all_partial_chunks(self):
+    def test_staging_returns_the_only_fresh_stage_and_writes_all_partial_chunks(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
             root = Path(directory)
-            destination = Path(staging) / "view"
             (root / "safe").mkdir()
             source = root / "safe" / "ok.txt"
             source.write_text("all staged bytes\n", encoding="utf-8")
             scope = offload_scope.expand_approved_scope(root, ["safe"])
-            destination.mkdir()
-            with self.assertRaises(ValueError):
-                offload_scope.stage_scope(root, scope, destination)
-            destination.rmdir()
             real_write = offload_scope.os.write
 
             def partial_write(descriptor, data):
@@ -281,20 +271,10 @@ class FreeContextWorkerTests(unittest.TestCase):
                 stage, _ = offload_scope.stage_captured_scope(
                     offload_scope.capture_scope(root, scope), Path(staging)
                 )
+            self.assertTrue(stage.is_dir())
+            self.assertEqual(list(Path(staging).iterdir()), [stage])
             self.assertEqual((stage / "safe" / "ok.txt").read_text(encoding="utf-8"),
                              "all staged bytes\n")
-
-    def test_staging_rejects_swapped_source_ancestor(self):
-        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
-            root = Path(directory)
-            (root / "safe").mkdir()
-            (root / "safe" / "ok.txt").write_text("safe\n", encoding="utf-8")
-            scope = offload_scope.expand_approved_scope(root, ["safe"])
-            destination = Path(staging) / "view"
-            with mock.patch.object(offload_scope, "_safe_workspace_path",
-                                   side_effect=ValueError("ancestor changed")):
-                with self.assertRaises(ValueError):
-                    offload_scope.stage_scope(root, scope, destination)
 
     def test_capture_rejects_real_ancestor_swap_at_open_boundary(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
@@ -348,6 +328,111 @@ class FreeContextWorkerTests(unittest.TestCase):
             with mock.patch.object(offload_scope.os, "write", side_effect=corrupt_first_write):
                 with self.assertRaises(ValueError):
                     offload_scope.stage_captured_scope(captured, Path(staging))
+
+    def test_staging_rejects_forged_paths_before_any_filesystem_mutation(self):
+        with tempfile.TemporaryDirectory() as staging:
+            parent = Path(staging)
+            outside = parent / "escape.txt"
+            invalid_entries = (
+                offload_scope.CapturedEntry("../escape.txt", b"escape\n",
+                                            "0" * 64),
+            )
+            forged = offload_scope.CapturedScope(invalid_entries, "0" * 64)
+
+            with self.assertRaises(ValueError):
+                offload_scope.stage_captured_scope(forged, parent)
+
+            self.assertFalse(outside.exists())
+            self.assertEqual(list(parent.iterdir()), [])
+
+    def test_staging_rejects_forged_entry_invariants_before_creating_stage(self):
+        def entry(path, data=b"safe\n", digest=None):
+            if digest is None:
+                digest = hashlib.sha256(data).hexdigest()
+            return offload_scope.CapturedEntry(path, data, digest)
+
+        class ForgedEntry(offload_scope.CapturedEntry):
+            pass
+
+        class ForgedPath(str):
+            pass
+
+        class ForgedDigest(str):
+            pass
+
+        safe_a = entry("safe/a.txt")
+        safe_b = entry("safe/b.txt")
+        forged_entry = ForgedEntry(safe_a.path, safe_a.data, safe_a.digest)
+        cases = {
+            "duplicate": (safe_a, safe_a),
+            "unsorted": (safe_b, safe_a),
+            "too many entries": tuple(
+                entry(f"safe/{index:03}.txt", b"x")
+                for index in range(offload_scope.MAX_FILES + 1)
+            ),
+            "oversized": (entry("safe/large.txt", b"x" * (offload_scope.MAX_FILE_BYTES + 1)),),
+            "sensitive path": (entry("safe/.env.local"),),
+            "sensitive suffix": (entry("safe/key.pem"),),
+            "entry subclass": (forged_entry,),
+            "path subclass": (entry(ForgedPath("safe/data.txt")),),
+            "non-bytes data": (
+                offload_scope.CapturedEntry("safe/data.txt", bytearray(b"safe\n"),
+                                            safe_a.digest),
+            ),
+            "binary content": (entry("safe/data.txt", b"safe\x00binary"),),
+            "sensitive content": (entry("safe/data.txt", b"password=live-secret\n"),),
+            "digest subclass": (
+                entry("safe/data.txt", digest=ForgedDigest(hashlib.sha256(b"safe\n").hexdigest())),
+            ),
+            "wrong entry digest": (entry("safe/data.txt", digest="0" * 64),),
+        }
+
+        for name, entries in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as staging:
+                parent = Path(staging)
+                forged = offload_scope.CapturedScope(
+                    entries, offload_scope._fingerprint_entries(entries)
+                )
+                with self.assertRaises(ValueError):
+                    offload_scope.stage_captured_scope(forged, parent)
+                self.assertEqual(list(parent.iterdir()), [])
+
+    def test_staging_rejects_forged_scope_shape_total_size_and_fingerprint_before_writes(self):
+        def entry(path, data):
+            return offload_scope.CapturedEntry(
+                path, data, hashlib.sha256(data).hexdigest()
+            )
+
+        valid = entry("safe/data.txt", b"safe\n")
+        aggregate = tuple(
+            entry(f"safe/{index}.txt", b"x" * (offload_scope.MAX_FILE_BYTES - 1))
+            for index in range(3)
+        )
+
+        class ForgedScope(offload_scope.CapturedScope):
+            pass
+
+        cases = {
+            "empty entries": offload_scope.CapturedScope(
+                (), offload_scope._fingerprint_entries(())
+            ),
+            "entries are not a tuple": offload_scope.CapturedScope(
+                [valid], offload_scope._fingerprint_entries((valid,))
+            ),
+            "aggregate oversized": offload_scope.CapturedScope(
+                aggregate, offload_scope._fingerprint_entries(aggregate)
+            ),
+            "wrong overall fingerprint": offload_scope.CapturedScope((valid,), "0" * 64),
+            "non-string fingerprint": offload_scope.CapturedScope((valid,), b"0" * 64),
+            "scope subclass": ForgedScope((valid,), offload_scope._fingerprint_entries((valid,))),
+        }
+
+        for name, forged in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as staging:
+                parent = Path(staging)
+                with self.assertRaises(ValueError):
+                    offload_scope.stage_captured_scope(forged, parent)
+                self.assertEqual(list(parent.iterdir()), [])
 
     def test_evidence_references_must_point_inside_original_scope_and_real_lines(self):
         with tempfile.TemporaryDirectory() as directory:
