@@ -1,11 +1,11 @@
 """Fail-closed validation and file staging for an external context worker."""
-from __future__ import annotations
-
 import hashlib
 import importlib.util
 import os
 import re
 import stat
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -30,6 +30,19 @@ CREDENTIAL_ASSIGNMENT = re.compile(
     rb'''(?im)(?:^|[\s,{])['"]?([a-z_][a-z0-9_-]*)['"]?\s*[:=]\s*['"]?([^\s,}\r\n'"]+)'''
 )
 REDACTED_VALUES = {b"<redacted>", b"redacted", b"<secret>", b"changeme", b"example"}
+
+
+@dataclass(frozen=True)
+class CapturedEntry:
+    path: str
+    data: bytes
+    digest: str
+
+
+@dataclass(frozen=True)
+class CapturedScope:
+    entries: tuple[CapturedEntry, ...]
+    fingerprint: str
 
 
 def require(condition: bool, message: str) -> None:
@@ -58,7 +71,8 @@ def _relative_path(value: Any) -> str:
         lowered = part.casefold()
         require(not lowered.startswith(".env"), "Sensitive path forbidden")
         stem = lowered.rsplit(".", 1)[0]
-        require(stem not in {"private-key", "private_key", "auth", "token", "secret"} and
+        require(stem not in {"private-key", "private_key", "auth", "token", "secret", "api-key",
+                             "api_key", "apikey"} and
                 not any(word in stem for word in ("credential", "password", "passwd")),
                 "Sensitive path forbidden")
     return value
@@ -210,7 +224,7 @@ def _read_verified_file(root: Path, relative: str, limit: int = MAX_FILE_BYTES) 
     return raw
 
 
-def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
+def _collect_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
     """Return sorted, privacy-checked regular files without following links."""
     require(isinstance(root, Path) and root.is_dir(), "Workspace root is unavailable")
     require(isinstance(approved_paths, list) and 1 <= len(approved_paths) <= MAX_APPROVED_PATHS,
@@ -246,94 +260,86 @@ def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
         walk(path, 0)
     ordered = sorted(files)
     require(ordered, "Approved scope is empty")
+    return ordered
+
+
+def _fingerprint_entries(entries: tuple[CapturedEntry, ...]) -> str:
+    digest = hashlib.sha256()
+    for entry in entries:
+        digest.update(entry.path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(entry.data)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(entry.data)
+    return digest.hexdigest()
+
+
+def capture_scope(root: Path, approved_paths: list[str]) -> CapturedScope:
+    """Capture one bounded, verified immutable view of the approved source files."""
+    paths = _collect_approved_scope(root, approved_paths)
+    entries: list[CapturedEntry] = []
     total = 0
-    for relative in ordered:
+    for relative in paths:
         raw = _read_verified_file(root, relative, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
         total += len(raw)
-        require(total <= MAX_TOTAL_BYTES, "Approved aggregate exceeds size limit")
-    return ordered
+        entries.append(CapturedEntry(relative, raw, hashlib.sha256(raw).hexdigest()))
+    frozen = tuple(entries)
+    return CapturedScope(frozen, _fingerprint_entries(frozen))
+
+
+def expand_approved_scope(root: Path, approved_paths: list[str]) -> list[str]:
+    return [entry.path for entry in capture_scope(root, approved_paths).entries]
 
 
 def fingerprint_scope(root: Path, scope: list[str]) -> str:
     """Produce a deterministic digest of names, sizes, and streamed approved file bytes."""
-    require(isinstance(scope, list) and 1 <= len(scope) <= MAX_FILES and scope == sorted(set(scope)),
-            "Invalid scope")
-    digest = hashlib.sha256()
-    total = 0
-    for relative in scope:
-        raw = _read_verified_file(root, relative, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - total))
-        total += len(raw)
-        require(total <= MAX_TOTAL_BYTES, "Approved aggregate exceeds size limit")
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(len(raw)).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(raw)
-    return digest.hexdigest()
+    return capture_scope(root, scope).fingerprint
+
+
+def stage_captured_scope(captured: CapturedScope, parent: Path) -> tuple[Path, CapturedScope]:
+    """Create a random private stage below parent and verify its actual bytes."""
+    require(isinstance(captured, CapturedScope) and captured.entries, "Invalid captured scope")
+    require(isinstance(parent, Path) and parent.is_dir(), "Invalid staging parent")
+    for ancestor in reversed(parent.parents):
+        require(not _is_link_or_reparse(ancestor.lstat()), "Staging parent is a link")
+    require(not _is_link_or_reparse(parent.lstat()), "Staging parent is a link")
+    try:
+        stage = Path(tempfile.mkdtemp(prefix="offload-", dir=parent))
+        os.chmod(stage, 0o700)
+    except OSError as error:
+        raise ValueError("Staging destination cannot be created") from error
+    for entry in captured.entries:
+        target = stage.joinpath(*entry.path.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+            written = 0
+            while written < len(entry.data):
+                count = os.write(descriptor, entry.data[written:])
+                require(count > 0, "Staging write failed")
+                written += count
+            os.fsync(descriptor)
+        except OSError as error:
+            raise ValueError("Staging write failed") from error
+        finally:
+            try:
+                os.close(descriptor)
+            except (OSError, UnboundLocalError):
+                pass
+    actual = capture_scope(stage, [entry.path for entry in captured.entries])
+    require(actual.fingerprint == captured.fingerprint, "Staged files do not match approved snapshot")
+    return stage, actual
 
 
 def stage_scope(root: Path, scope: list[str], destination: Path,
                 expected_snapshot: str | None = None) -> list[str]:
-    """Copy approved bytes into a separate view after checking the original snapshot."""
-    snapshot = fingerprint_scope(root, scope)
+    """Compatibility wrapper; callers needing the stage path use stage_captured_scope."""
+    captured = capture_scope(root, scope)
     if expected_snapshot is not None:
-        require(snapshot == expected_snapshot, "Approved workspace snapshot changed")
-    require(isinstance(destination, Path) and destination.parent.is_dir() and not destination.exists(),
-            "Staging destination must be newly created")
-    for parent in reversed(destination.parents):
-        try:
-            require(not _is_link_or_reparse(parent.lstat()), "Staging parent is a link")
-        except OSError as error:
-            raise ValueError("Staging parent is unavailable") from error
-    try:
-        os.mkdir(destination)
-    except OSError as error:
-        raise ValueError("Staging destination cannot be created") from error
-    info = destination.lstat()
-    require(stat.S_ISDIR(info.st_mode) and not _is_link_or_reparse(info), "Staging destination is a link")
-    staged_digest = hashlib.sha256()
-    created_dirs: set[Path] = set()
-    staged_total = 0
-    for relative in scope:
-        raw = _read_verified_file(root, relative, min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - staged_total))
-        staged_total += len(raw)
-        target = destination.joinpath(*relative.split("/"))
-        parent = destination
-        for component in relative.split("/")[:-1]:
-            parent = parent / component
-            if parent.exists():
-                require(parent in created_dirs, "Staging destination component already exists")
-            else:
-                try:
-                    os.mkdir(parent)
-                except OSError as error:
-                    raise ValueError("Staging destination component cannot be created") from error
-                created_dirs.add(parent)
-        parent_info = target.parent.lstat()
-        require(stat.S_ISDIR(parent_info.st_mode) and not _is_link_or_reparse(parent_info),
-                "Staging destination contains a link")
-        try:
-            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-        except OSError as error:
-            raise ValueError("Staging target cannot be safely created") from error
-        try:
-            written = 0
-            while written < len(raw):
-                count = os.write(descriptor, raw[written:])
-                require(count > 0, "Staging write failed")
-                written += count
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        staged_digest.update(relative.encode("utf-8"))
-        staged_digest.update(b"\0")
-        staged_digest.update(str(len(raw)).encode("ascii"))
-        staged_digest.update(b"\0")
-        staged_digest.update(raw)
-    require(staged_digest.hexdigest() == snapshot, "Approved workspace changed while staging")
-    require(fingerprint_scope(root, scope) == snapshot, "Approved workspace changed while staging")
-    require(fingerprint_scope(destination, scope) == snapshot, "Staged files do not match approved snapshot")
-    return list(scope)
+        require(captured.fingerprint == expected_snapshot, "Approved workspace snapshot changed")
+    require(not destination.exists(), "Staging destination must be newly created")
+    stage_captured_scope(captured, destination.parent)
+    return [entry.path for entry in captured.entries]
 
 
 def validate_evidence_references(root: Path, original_scope: list[str], evidence: list[dict[str, Any]]) -> None:
@@ -344,10 +350,8 @@ def validate_evidence_references(root: Path, original_scope: list[str], evidence
         require(isinstance(item, dict), "Invalid evidence reference")
         path = item.get("path")
         require(path in allowed, "Evidence path is outside approved scope")
-        source = _validated_file(root, path)
         try:
-            with source.open("r", encoding="utf-8", newline=None) as stream:
-                line_count = sum(1 for _ in stream)
+            line_count = len(_read_verified_file(root, path).decode("utf-8").splitlines())
         except UnicodeError as error:
             raise ValueError("Evidence source is not text") from error
         start, end = item.get("start_line"), item.get("end_line")
