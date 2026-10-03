@@ -32,7 +32,7 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TASK_KINDS = frozenset(("repo_scout", "bulk_file_read", "log_distill", "diff_analysis", "long_doc_digest"))
 _GEMINI_SCHEMA_KEYS = frozenset((
     "type", "properties", "required", "additionalProperties", "enum", "format",
-    "items", "minItems", "maxItems", "minimum", "maximum", "title", "description",
+    "items", "minimum", "maximum", "title", "description",
 ))
 
 
@@ -283,6 +283,7 @@ class GeminiProvider:
 
         https://ai.google.dev/gemini-api/docs/structured-output#json-schema
         The canonical schema remains the local acceptance contract after generation.
+        Array bounds are enforced locally to avoid API grammar-complexity rejection.
         """
         if not isinstance(schema, Mapping):
             raise ProviderError("invalid_pack")
@@ -374,12 +375,14 @@ class GeminiProvider:
         if secret.encode("utf-8") in response.body:
             raise ProviderError("credential_leak")
         usage: dict[str, int] = {}
+        diagnostics = {"provider_output_issue": "invalid_response_json"}
         try:
             payload = efficiency.parse_bounded_json(response.body, limit=limit)
             if not isinstance(payload, dict):
                 raise ValueError
             if _contains_secret(payload, secret):
                 raise ProviderError("credential_leak")
+            diagnostics["provider_output_issue"] = "invalid_usage"
             usage_raw = payload.get("usageMetadata", {})
             if not isinstance(usage_raw, dict):
                 raise ValueError
@@ -389,17 +392,35 @@ class GeminiProvider:
                 "output_tokens": usage_raw.get("candidatesTokenCount"),
                 "reasoning_output_tokens": usage_raw.get("thoughtsTokenCount"),
             })
+            diagnostics["provider_output_issue"] = "invalid_candidates"
             candidates = payload["candidates"]
             if not isinstance(candidates, list) or len(candidates) != 1 or not isinstance(candidates[0], dict):
                 raise ValueError
             candidate = candidates[0]
-            if candidate.get("finishReason") != "STOP" or not isinstance(candidate.get("content"), dict):
+            diagnostics.update(safe_diagnostics({"provider_finish_reason": candidate.get("finishReason")}))
+            diagnostics["provider_output_issue"] = "non_stop_finish"
+            if candidate.get("finishReason") != "STOP":
+                raise ValueError
+            diagnostics["provider_output_issue"] = "invalid_content_parts"
+            if not isinstance(candidate.get("content"), dict):
                 raise ValueError
             parts = candidate["content"]["parts"]
-            if (not isinstance(parts, list) or len(parts) != 1 or not isinstance(parts[0], dict) or
-                    set(parts[0]) != {"text"} or not isinstance(parts[0]["text"], str)):
+            if not isinstance(parts, list) or not parts:
                 raise ValueError
-            pack = efficiency.parse_bounded_json(parts[0]["text"], limit=limit)
+            texts = []
+            for part in parts:
+                if (not isinstance(part, dict) or set(part) - {"text", "thought", "thoughtSignature"} or
+                        not isinstance(part.get("text"), str) or
+                        ("thought" in part and type(part["thought"]) is not bool) or
+                        ("thoughtSignature" in part and not isinstance(part["thoughtSignature"], str))):
+                    raise ValueError
+                if not part.get("thought", False):
+                    texts.append(part["text"])
+            if len(texts) != 1:
+                raise ValueError
+            diagnostics["provider_output_issue"] = "invalid_pack_json"
+            pack = efficiency.parse_bounded_json(texts[0], limit=limit)
+            diagnostics["provider_output_issue"] = "non_object_pack"
             if not isinstance(pack, dict):
                 raise ValueError
             model = payload.get("modelVersion")
@@ -408,7 +429,7 @@ class GeminiProvider:
         except ProviderError:
             raise
         except (IndexError, KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
-            raise ProviderError("invalid_pack", usage) from None
+            raise ProviderError("invalid_pack", {**usage, **diagnostics}) from None
 
     def generate_evidence_pack(self, task: Mapping[str, Any], captured_scope: Any,
                                evidence_schema: Mapping[str, Any], limits: Mapping[str, Any]) -> GenerationResult:

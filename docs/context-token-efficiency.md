@@ -244,3 +244,5 @@ These are upstream documentation observations, not live compatibility results.
    the direct provider uses header authentication, a compatible schema projection,
    and response usage/model metadata; checked 2026-10-03. The canonical local
    EvidencePack validator enforces constraints omitted from the API schema subset.
+   Array bounds are enforced locally; documented text-part thought/signature
+   metadata is discarded before accepting the final JSON pack.

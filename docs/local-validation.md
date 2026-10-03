@@ -128,6 +128,14 @@ API status/reason codes, or a fixed transport category such as `tls_error` or
 exception text, or the key. Unknown diagnostic codes are omitted. Configuration
 READY still does not mean connectivity has been verified.
 
+For rejected HTTP 200 output, fixed `provider_output_issue` and recognized
+`provider_finish_reason` codes identify the parsing stage and completion state.
+Documented text-part `thought` and `thoughtSignature` metadata are accepted;
+reasoning parts and signatures are discarded before the EvidencePack handoff.
+Tool parts, malformed metadata, truncated output, and invalid packs still fail.
+Array bounds are omitted from the API schema to avoid the observed HTTP 400;
+the canonical local validator continues enforcing every array limit.
+
 For HTTP request errors, `provider_error_hints` contains only fixed labels for
 terms in the provider message, such as `schema_enum`, `schema_complexity`,
 `json_schema`, or `api_key`. These are lexical hints, not a verified diagnosis.
@@ -140,7 +148,8 @@ python scripts/validate_gemini.py --diagnose-request --timeout 30
 ```
 
 This sends up to four small requests with identical model, task, captured data,
-and token settings: full schema; minimal schema; full schema without array
+and token settings: full schema with canonical array bounds explicitly restored;
+minimal schema; full schema without array
 bounds; and the same minimal schema using the current documented `responseFormat`
 field. It stops on authentication, quota, credential, timeout, or transport errors.
 It reports only HTTP outcomes and safe error codes; responses are discarded.

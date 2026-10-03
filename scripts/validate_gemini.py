@@ -171,6 +171,18 @@ def run_request_diagnostics(*, environment: Mapping[str, str] | None = None,
         return report, 2
     canonical = efficiency.read_json(worker.OUTPUT_SCHEMA)
 
+    def restore_array_bounds(projected: dict[str, Any], source: dict[str, Any]) -> None:
+        for key in ("minItems", "maxItems"):
+            if key in source:
+                projected[key] = source[key]
+        for key in ("properties", "items"):
+            if isinstance(projected.get(key), dict) and isinstance(source.get(key), dict):
+                if key == "properties":
+                    for name, child in projected[key].items():
+                        restore_array_bounds(child, source[key][name])
+                else:
+                    restore_array_bounds(projected[key], source[key])
+
     def without_array_bounds(value: Any) -> Any:
         if isinstance(value, dict):
             return {key: without_array_bounds(item) for key, item in value.items()
@@ -195,11 +207,14 @@ def run_request_diagnostics(*, environment: Mapping[str, str] | None = None,
             case: dict[str, Any] = {"case": name, "http_success": False, "generation_result_received": False}
 
             def send(url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> Any:
-                if current_format:
+                if current_format or name == "full_schema":
                     payload = efficiency.parse_bounded_json(body, limit=1_048_576)
                     config = payload["generationConfig"]
-                    config["responseFormat"] = {"text": {"mimeType": config.pop("responseMimeType"),
-                                                        "schema": config.pop("responseJsonSchema")}}
+                    if name == "full_schema":
+                        restore_array_bounds(config["responseJsonSchema"], canonical)
+                    if current_format:
+                        config["responseFormat"] = {"text": {"mimeType": config.pop("responseMimeType"),
+                                                            "schema": config.pop("responseJsonSchema")}}
                     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                     if env["GEMINI_API_KEY"].encode("utf-8") in body:
                         raise ProviderError("credential_leak")

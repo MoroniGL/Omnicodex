@@ -200,6 +200,9 @@ class GeminiProviderTests(unittest.TestCase):
         self.assertNotIn("uniqueItems", encoded)
         self.assertNotIn("minLength", encoded)
         self.assertNotIn("maxLength", encoded)
+        self.assertNotIn("maxItems", encoded)
+        self.assertNotIn("minItems", encoded)
+        self.assertIn("maxItems", json.dumps(canonical))
         self.assertIn("uniqueItems", json.dumps(canonical))
 
     def test_scope_is_captured_data_not_a_workspace_path(self):

@@ -15,6 +15,12 @@ _DIAGNOSTIC_CODES = {
         "QUOTA_EXCEEDED")),
     "transport_error": frozenset(("tls_error", "dns_error", "connection_error",
         "http_protocol_error", "request_encoding_error", "transport_error")),
+    "provider_finish_reason": frozenset(("STOP", "MAX_TOKENS", "SAFETY", "RECITATION",
+        "LANGUAGE", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+        "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS")),
+    "provider_output_issue": frozenset(("invalid_response_json", "invalid_usage",
+        "invalid_candidates", "non_stop_finish", "invalid_content_parts",
+        "invalid_pack_json", "non_object_pack")),
 }
 
 _REQUEST_HINT_TERMS = {

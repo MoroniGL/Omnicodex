@@ -7,7 +7,7 @@ from scripts import validate_gemini
 
 
 class LiveValidationTests(unittest.TestCase):
-    def transport(self, requests, *, usage=True, invalid=False):
+    def transport(self, requests, *, usage=True, invalid=False, part_metadata=None, thought=False):
         def send(url, body, headers, timeout):
             payload = json.loads(body)
             prompt = payload["contents"][0]["parts"][0]["text"]
@@ -21,6 +21,10 @@ class LiveValidationTests(unittest.TestCase):
                              "kind": "doc"}]}], "risks": [], "unknowns": [], "validation": []}
             response = {"candidates": [{"finishReason": "STOP", "content": {
                 "parts": [{"text": json.dumps({} if invalid else pack)}]}}]}
+            parts = response["candidates"][0]["content"]["parts"]
+            parts[0].update(part_metadata or {})
+            if thought:
+                parts.insert(0, {"text": "Untrusted reasoning never enters the pack.", "thought": True})
             if usage:
                 response.update(modelVersion="observed-model", usageMetadata={
                     "promptTokenCount": 46000, "candidatesTokenCount": 200})
@@ -248,6 +252,59 @@ class LiveValidationTests(unittest.TestCase):
             self.assertEqual(validate_gemini.main(["--diagnose-request", "--timeout", "30"]), 0)
             diagnostic.assert_called_once_with(timeout_seconds=30.0)
             acceptance.assert_not_called()
+
+    def test_signed_text_and_separate_thought_part_do_not_enter_handoff(self):
+        for thought in (False, True):
+            with self.subTest(thought=thought):
+                report, code = validate_gemini.run_validation(
+                    environment={"GEMINI_API_KEY": "acceptance-key"},
+                    transport=self.transport([], part_metadata={"thoughtSignature": "opaque-signature", "thought": False},
+                                             thought=thought))
+                self.assertEqual(code, 0)
+                self.assertEqual(report["status"], "accepted")
+                self.assertNotIn("opaque-signature", json.dumps(report))
+                self.assertNotIn("Untrusted reasoning", json.dumps(report))
+
+    def test_text_metadata_never_permits_tool_parts_or_malformed_flags(self):
+        for metadata in ({"functionCall": {"name": "unsafe"}}, {"thought": "false"},
+                         {"thoughtSignature": 12}, {"unknown": True}):
+            with self.subTest(metadata=metadata):
+                report, code = validate_gemini.run_validation(
+                    environment={"GEMINI_API_KEY": "acceptance-key"},
+                    transport=self.transport([], part_metadata=metadata))
+                self.assertEqual(code, 3)
+                self.assertEqual(report["provider_diagnostics"]["provider_output_issue"], "invalid_content_parts")
+
+    def test_signature_echoing_key_fails_before_output_diagnostics(self):
+        report, code = validate_gemini.run_validation(environment={"GEMINI_API_KEY": "acceptance-key"},
+            transport=self.transport([], part_metadata={"thoughtSignature": "acceptance-key"}))
+        self.assertEqual(code, 3)
+        self.assertEqual(report["reason_code"], "credential_leak")
+        self.assertNotIn("acceptance-key", json.dumps(report))
+
+    def test_output_diagnostics_report_stop_reason_without_content(self):
+        body = b'{"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"truncated private"}]}}]}'
+        report, code = validate_gemini.run_validation(environment={"GEMINI_API_KEY": "acceptance-key"},
+            transport=lambda *args: (200, {}, body))
+        self.assertEqual(code, 3)
+        self.assertEqual(report["provider_diagnostics"]["provider_finish_reason"], "MAX_TOKENS")
+        self.assertEqual(report["provider_diagnostics"]["provider_output_issue"], "non_stop_finish")
+        self.assertNotIn("truncated private", json.dumps(report))
+
+    def test_api_projection_does_not_relax_local_array_limit(self):
+        underlying = self.transport([])
+        def oversized(*args):
+            status, headers, body = underlying(*args)
+            payload = json.loads(body)
+            part = payload["candidates"][0]["content"]["parts"][0]
+            pack = json.loads(part["text"])
+            pack["risks"] = ["Synthetic risk."] * 33
+            part["text"] = json.dumps(pack)
+            return status, headers, json.dumps(payload).encode()
+        report, code = validate_gemini.run_validation(environment={"GEMINI_API_KEY": "acceptance-key"}, transport=oversized)
+        self.assertEqual(code, 3)
+        self.assertEqual(report["status"], "failed")
+        self.assertFalse(report["connectivity_verified"])
 
 
 if __name__ == "__main__":
