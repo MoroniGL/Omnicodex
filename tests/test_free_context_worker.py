@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ def _load_optional_module(name):
 
 codex_exec_adapter = _load_optional_module("codex_exec_adapter")
 offload_telemetry = _load_optional_module("offload_telemetry")
+free_context_worker = _load_optional_module("free_context_worker")
 
 
 class FreeContextWorkerTests(unittest.TestCase):
@@ -123,9 +125,12 @@ class FreeContextWorkerTests(unittest.TestCase):
             try:
                 (root / "safe" / "link.txt").symlink_to(root / "safe" / "ok.txt")
             except OSError:
-                self.skipTest("Host does not allow creating symlinks")
-            with self.assertRaises(ValueError):
-                offload_scope.expand_approved_scope(root, ["safe/link.txt"])
+                reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                synthetic = mock.Mock(st_mode=stat.S_IFREG, st_file_attributes=reparse)
+                self.assertTrue(offload_scope._is_link_or_reparse(synthetic))
+            else:
+                with self.assertRaises(ValueError):
+                    offload_scope.expand_approved_scope(root, ["safe/link.txt"])
 
     def test_expand_scope_rejects_real_credentials_but_allows_redacted_placeholders(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -282,9 +287,12 @@ class FreeContextWorkerTests(unittest.TestCase):
             try:
                 destination.symlink_to(Path(outside), target_is_directory=True)
             except OSError:
-                self.skipTest("Host does not allow creating symlinks")
-            with self.assertRaises(ValueError):
-                offload_scope.stage_captured_scope(captured, destination)
+                with mock.patch.object(offload_scope, "_is_link_or_reparse", return_value=True):
+                    with self.assertRaises(ValueError):
+                        offload_scope.stage_captured_scope(captured, Path(staging))
+            else:
+                with self.assertRaises(ValueError):
+                    offload_scope.stage_captured_scope(captured, destination)
 
     def test_staging_returns_the_only_fresh_stage_and_writes_all_partial_chunks(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as staging:
@@ -746,7 +754,13 @@ class CodexExecAdapterTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.adapter()._read_final_output(fifo, 100)
             if not exercised:
-                self.skipTest("Host cannot create a link or FIFO")
+                reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                entry = mock.Mock(st_mode=stat.S_IFREG, st_file_attributes=reparse)
+                with mock.patch.object(self.adapter().os, "lstat", return_value=entry), \
+                        mock.patch.object(self.adapter().os, "open",
+                                          side_effect=AssertionError("unsafe path opened")):
+                    with self.assertRaises(ValueError):
+                        self.adapter()._read_final_output(Path("unsafe-output"), 100)
 
     def test_final_output_rejects_reparse_and_nonregular_entries_before_open(self):
         reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -776,6 +790,245 @@ class CodexExecAdapterTests(unittest.TestCase):
                                       side_effect=lambda _path, flags: real_open(replacement, flags)):
                 with self.assertRaises(ValueError):
                     self.adapter()._read_final_output(expected, 100)
+
+
+class WorkerOrchestrationTests(unittest.TestCase):
+    """End-to-end orchestration with a real subprocess boundary.
+
+    Removing the native gate or sending the original workspace to Codex must
+    make these tests fail.
+    """
+
+    def worker(self):
+        self.assertIsNotNone(free_context_worker, "free context worker is missing")
+        return free_context_worker
+
+    def request(self, estimated_chars=80_000):
+        return {
+            "schema_version": 1, "task_kind": "repo_scout", "objective": "Map code.",
+            "approved_paths": ["safe.txt"], "data_classification": "public",
+            "external_offload_approved": True,
+            "metrics": {"schema_version": 1, "task_kind": "repo_scout",
+                        "estimated_chars": estimated_chars, "file_count": 1,
+                        "diff_lines": 0, "log_bytes": 0, "search_hits": 1,
+                        "data_classification": "public", "external_offload_approved": True,
+                        "independent_units": 1},
+        }
+
+    def test_small_request_returns_native_fallback_without_starting_codex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("unique-staged-marker\n", encoding="utf-8")
+            request = Path(directory) / "request.json"
+            request.write_text(json.dumps(self.request(100)), encoding="utf-8")
+            result, code = self.worker().run_action(
+                "dry-run", root, request, "balanced", None, None, 1, environment={}
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual((result["status"], result["route"]), ("fallback", "native"))
+        self.assertIn("context_below_offload_threshold", result["reason_codes"])
+
+    def test_eligible_request_runs_once_against_staged_scope_and_writes_accepted_pack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("unique-staged-marker\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            fake = base / "fake.py"
+            fake.write_text(
+                "import json,pathlib,sys\n"
+                "a=sys.argv; stage=pathlib.Path(a[a.index('--cd')+1]); out=pathlib.Path(a[a.index('--output-last-message')+1])\n"
+                "assert (stage/'safe.txt').read_text() == 'unique-staged-marker\\n'\n"
+                "assert not (stage/'outside.txt').exists()\n"
+                "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'output_tokens':1,'reasoning_output_tokens':0}}))\n"
+                "out.write_text(json.dumps({'schema_version':1,'status':'completed','task_kind':'repo_scout','snapshot':sys.stdin.read().split('snapshot=')[1].split('\\n')[0],'summary':'ok','relevant_files':['safe.txt'],'findings':[{'claim':'marker','evidence':[{'path':'safe.txt','start_line':1,'end_line':1,'kind':'source'}]}],'risks':[],'unknowns':[],'validation':[]}))\n",
+                encoding="utf-8",
+            )
+            artifacts = base / "artifacts"
+            result, code = self.worker().run_action(
+                "run", root, request, "balanced", (sys.executable, str(fake)), artifacts, 2,
+                environment={"FREELLMAPI_API_KEY": "not-in-result"},
+            )
+            receipt = json.loads((artifacts / "receipt.json").read_text(encoding="utf-8"))
+            pack = json.loads((artifacts / "evidence-pack.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(pack["summary"], "ok")
+        self.assertEqual(receipt["worker_outcome"], "completed")
+        self.assertNotIn("not-in-result", json.dumps(result))
+
+    def test_missing_key_or_binary_falls_back_without_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            cases = (
+                ((sys.executable, "unused.py"), {}, "missing_key"),
+                (None, {"FREELLMAPI_API_KEY": "configured"}, "codex_unavailable"),
+            )
+            for codex, environment, reason in cases:
+                with self.subTest(reason=reason):
+                    artifacts = base / (reason + "-artifacts")
+                    result, code = self.worker().run_action(
+                        "run", root, request, "balanced", codex, artifacts, 1,
+                        environment=environment,
+                    )
+                    self.assertEqual((code, result["status"], result["route"]),
+                                     (0, "fallback", "native"))
+                    self.assertIn(reason, result["reason_codes"])
+                    self.assertFalse(artifacts.exists())
+
+    def test_dry_run_is_offline_secret_free_and_uses_scope_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            marker = "raw-marker-never-in-command"
+            (root / "safe.txt").write_text(marker + "\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            secret = "worker-key-never-serialized"
+            result, code = self.worker().run_action(
+                "dry-run", root, request, "balanced", (sys.executable, "fake.py"),
+                None, 1, environment={"FREELLMAPI_API_KEY": secret},
+            )
+        rendered = json.dumps(result)
+        self.assertEqual((code, result["status"], result["route"]),
+                         (0, "ready", "free_context_worker"))
+        self.assertRegex(result["snapshot"], r"^[0-9a-f]{64}$")
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(marker, rendered)
+        self.assertIn("--sandbox read-only", result["command_preview_posix"])
+
+    def test_snapshot_mismatch_and_invalid_endpoint_fail_without_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            value = self.request()
+            value["expected_snapshot"] = "0" * 64
+            request = base / "request.json"
+            request.write_text(json.dumps(value), encoding="utf-8")
+            result, code = self.worker().run_action(
+                "run", root, request, "balanced", (sys.executable, "unused.py"),
+                base / "artifacts", 1,
+                environment={"FREELLMAPI_API_KEY": "configured"},
+            )
+            self.assertEqual((code, result["reason_code"]), (3, "snapshot_mismatch"))
+            value.pop("expected_snapshot")
+            request.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.worker().run_action(
+                    "dry-run", root, request, "balanced", (sys.executable, "unused.py"),
+                    None, 1,
+                    environment={"FREELLMAPI_API_KEY": "configured",
+                                 "FREELLMAPI_BASE_URL": "https://key@example.test/v1"},
+                )
+
+    def test_timeout_and_artifact_placement_are_bounded_before_worker_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            environment = {"FREELLMAPI_API_KEY": "configured"}
+            for timeout in (0, -1, float("inf"), float("nan"), 301):
+                with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                    self.worker().run_action(
+                        "dry-run", root, request, "balanced",
+                        (sys.executable, "unused.py"), None, timeout,
+                        environment=environment,
+                    )
+            with self.assertRaises(ValueError):
+                self.worker().run_action(
+                    "run", root, request, "balanced", (sys.executable, "unused.py"),
+                    root / "artifacts", 1, environment=environment,
+                )
+            self.assertFalse((root / "artifacts").exists())
+
+    def test_invalid_pack_is_rejected_once_and_receipt_contains_no_raw_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            marker = "raw-source-must-stay-local"
+            (root / "safe.txt").write_text(marker + "\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            counter = base / "count.txt"
+            fake = base / "fake.py"
+            fake.write_text(
+                "import pathlib,sys\n"
+                "a=sys.argv; c=pathlib.Path(sys.argv[1]); c.write_text((c.read_text() if c.exists() else '')+'x')\n"
+                "pathlib.Path(a[a.index('--output-last-message')+1]).write_text('{}')\n",
+                encoding="utf-8",
+            )
+            artifacts = base / "artifacts"
+            result, code = self.worker().run_action(
+                "run", root, request, "balanced", (sys.executable, str(fake), str(counter)),
+                artifacts, 2, environment={"FREELLMAPI_API_KEY": "configured"},
+            )
+            receipt = json.loads((artifacts / "receipt.json").read_text(encoding="utf-8"))
+            count = counter.read_text(encoding="utf-8")
+            evidence_pack_exists = (artifacts / "evidence-pack.json").exists()
+        self.assertEqual((code, result["reason_code"]), (3, "invalid_pack"))
+        self.assertEqual(count, "x")
+        self.assertTrue(receipt["native_fallback_recommended"])
+        self.assertFalse(evidence_pack_exists)
+        self.assertNotIn(marker, json.dumps(receipt))
+
+    def test_workspace_mutation_invalidates_pack_after_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            source = root / "safe.txt"
+            source.write_text("before\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            fake = base / "slow.py"
+            fake.write_text(
+                "import json,pathlib,sys,time\n"
+                "a=sys.argv; prompt=sys.stdin.read(); time.sleep(.2)\n"
+                "snap=prompt.split('snapshot=')[1].split('\\n')[0]\n"
+                "pathlib.Path(a[a.index('--output-last-message')+1]).write_text(json.dumps({'schema_version':1,'status':'completed','task_kind':'repo_scout','snapshot':snap,'summary':'ok','relevant_files':['safe.txt'],'findings':[{'claim':'c','evidence':[{'path':'safe.txt','start_line':1,'end_line':1,'kind':'source'}]}],'risks':[],'unknowns':[],'validation':[]}))\n",
+                encoding="utf-8",
+            )
+            thread = threading.Thread(
+                target=lambda: (time.sleep(.08), source.write_text("after\n", encoding="utf-8"))
+            )
+            thread.start()
+            try:
+                result, code = self.worker().run_action(
+                    "run", root, request, "balanced", (sys.executable, str(fake)),
+                    base / "artifacts", 2,
+                    environment={"FREELLMAPI_API_KEY": "configured"},
+                )
+            finally:
+                thread.join()
+        self.assertEqual((code, result["reason_code"]), (3, "workspace_mutated"))
+
+    def test_doctor_reports_local_prerequisites_without_live_claims_or_key(self):
+        secret = "doctor-secret"
+        result, code = self.worker().run_action(
+            "doctor", None, None, "balanced", (sys.executable,), None, 1,
+            environment={"FREELLMAPI_API_KEY": secret},
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(result["key_configured"])
+        self.assertTrue(result["codex_available"])
+        self.assertFalse(result["gateway_probed"])
+        self.assertFalse(result["runtime_model_verified"])
+        self.assertNotIn(secret, json.dumps(result))
 
 
 if __name__ == "__main__":
