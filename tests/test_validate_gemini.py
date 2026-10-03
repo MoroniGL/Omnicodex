@@ -7,6 +7,25 @@ from scripts import validate_gemini
 
 
 class LiveValidationTests(unittest.TestCase):
+    def test_unicode_line_coordinates_and_citation_byte_budget_agree(self):
+        import hashlib
+        from scripts import free_context_worker as worker, offload_scope as scope
+        from scripts.providers.gemini import GeminiProvider
+        data = "a\u2028b\u0085c\n".encode("utf-8")
+        entry = scope.CapturedEntry("evidence.txt", data, hashlib.sha256(data).hexdigest())
+        captured = scope.CapturedScope((entry,), scope._fingerprint_entries((entry,)))
+        prompt = GeminiProvider._prompt("long_doc_digest", "Find b.", captured, 200)
+        displayed = json.loads(prompt.split("captured_entries=", 1)[1])[0]
+        self.assertEqual(displayed["content"], "1: a\n2: b\n3: c")
+        self.assertEqual(displayed["line_count"], 3)
+        reference = {"path": "evidence.txt", "start_line": 2, "end_line": 3, "kind": "doc"}
+        scope.validate_captured_references(captured, [reference])
+        pack = {"findings": [{"evidence": [reference]}]}
+        self.assertEqual(worker._verification_evidence_bytes(pack, captured), len("b\u0085c\n".encode("utf-8")))
+        metrics = worker._captured_metrics(validate_gemini._request(), captured, True)
+        self.assertEqual(metrics["diff_lines"], 3)
+        self.assertEqual(entry.data, data)
+
     def transport(self, requests, *, usage=True, invalid=False, part_metadata=None, thought=False):
         def send(url, body, headers, timeout):
             payload = json.loads(body)

@@ -65,6 +65,36 @@ class DirectWorkerTests(unittest.TestCase):
     def receipt(self):
         return json.loads((self.base / "artifacts" / "receipt.json").read_text())
 
+    def test_numbered_capture_preserves_per_file_line_coordinates_and_hashes(self):
+        raw = "primeira\r\n\r\núltima sem newline".encode("utf-8")
+        (self.root / "extra.txt").write_bytes(raw)
+        self.request["approved_paths"].append("extra.txt")
+        captured = scope.capture_scope(self.root, self.request["approved_paths"])
+        pack = self.pack()
+        pack["snapshot"] = captured.fingerprint
+        result, code = self.invoke(pack=pack)
+        self.assertEqual(code, 0)
+        prompt = json.loads(self.requests[0][1])["contents"][0]["parts"][0]["text"]
+        entries = json.loads(prompt.split("captured_entries=", 1)[1])
+        numbered = {entry["path"]: entry for entry in entries}
+        self.assertEqual(numbered["extra.txt"]["content"], "1: primeira\n2: \n3: última sem newline")
+        self.assertEqual(numbered["extra.txt"]["line_count"], 3)
+        self.assertTrue(numbered["safe.txt"]["content"].startswith("1: approved marker\n2: "))
+        self.assertEqual(numbered["safe.txt"]["line_count"], 4001)
+        self.assertEqual({entry["path"]: entry["sha256"] for entry in entries},
+                         {entry.path: entry.digest for entry in captured.entries})
+        self.assertEqual((self.root / "extra.txt").read_bytes(), raw)
+        self.assertEqual(self.receipt()["snapshot_after"], captured.fingerprint)
+        self.assertNotIn("outside.txt", numbered)
+
+    def test_numbering_overhead_is_bounded_before_any_network_request(self):
+        self.source.write_bytes(b"x\n" * 131071)
+        result, code = self.invoke()
+        self.assertEqual(code, 3)
+        self.assertEqual(result["reason_code"], "invalid_pack")
+        self.assertEqual(self.requests, [])
+        self.assertFalse((self.base / "artifacts" / "evidence-pack.json").exists())
+
     def test_local_rejections_identify_fixed_issue_without_publishing_pack(self):
         for issue in ("schema", "task_kind_mismatch", "snapshot_mismatch", "unapproved_file",
                       "citations", "operational_instructions"):

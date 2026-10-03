@@ -118,7 +118,7 @@ def _captured_metrics(request: dict[str, Any], captured: Any,
                       provider_available: bool) -> dict[str, Any]:
     metrics = dict(request["metrics"])
     total_bytes = sum(len(entry.data) for entry in captured.entries)
-    total_lines = sum(len(entry.data.splitlines()) for entry in captured.entries)
+    total_lines = sum(len(scope.source_lines(entry.data)) for entry in captured.entries)
     metrics.update({
         "estimated_chars": total_bytes,
         "file_count": len(captured.entries),
@@ -153,7 +153,8 @@ def _fallback(plan: dict[str, Any], reason: str | None = None) -> dict[str, Any]
 
 
 def _verification_evidence_bytes(pack: dict[str, Any], captured: Any) -> int:
-    entries = {entry.path: entry.data.splitlines(keepends=True) for entry in captured.entries}
+    entries = {entry.path: [line.encode("utf-8") for line in scope.source_lines(entry.data, keepends=True)]
+               for entry in captured.entries}
     intervals: dict[str, list[tuple[int, int]]] = {}
     for finding in pack["findings"]:
         for evidence in finding["evidence"]:

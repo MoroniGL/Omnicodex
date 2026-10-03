@@ -50,6 +50,11 @@ WSL, Ubuntu, Docker, or OS sandbox. `GEMINI_API_KEY` is read from the environmen
 only; `OMNICODEX_GEMINI_MODEL` selects the model and defaults to
 `gemini-3.5-flash-lite`.
 
+Captured text is displayed with one-based line labels reset per file, including
+blank lines. Original bytes, hashes, and size metrics remain unchanged. Labels
+help locate citations but do not establish that a claim follows from the cited
+text: only the premium parent's source verification can establish that.
+
 The local validator rejects unknown fields, wrong task/snapshot, out-of-scope
 files, invalid or missing line evidence, oversized packs, and a changed source
 snapshot. The final acceptance check counts the UTF-8 bytes in the pack plus the

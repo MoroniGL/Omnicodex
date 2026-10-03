@@ -57,6 +57,11 @@ class CapturedScope:
     fingerprint: str
 
 
+def source_lines(data: bytes, *, keepends: bool = False) -> list[str]:
+    """Use the same UTF-8 line coordinates for display, validation, and budgets."""
+    return data.decode("utf-8").splitlines(keepends=keepends)
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
@@ -371,7 +376,7 @@ def validate_captured_references(captured: CapturedScope, evidence: list[dict[st
     """Validate ranges solely against immutable approved bytes, with no filesystem access."""
     _validate_captured_scope(captured)
     require(isinstance(evidence, list), "Evidence must be a list")
-    lines = {entry.path: len(entry.data.decode("utf-8").splitlines()) for entry in captured.entries}
+    lines = {entry.path: len(source_lines(entry.data)) for entry in captured.entries}
     for item in evidence:
         require(isinstance(item, dict), "Invalid evidence reference")
         path = item.get("path")
@@ -430,7 +435,7 @@ def validate_evidence_references(root: Path, original_scope: list[str], evidence
         path = item.get("path")
         require(path in allowed, "Evidence path is outside approved scope")
         try:
-            line_count = len(_read_verified_file(root, path).decode("utf-8").splitlines())
+            line_count = len(source_lines(_read_verified_file(root, path)))
         except UnicodeError as error:
             raise ValueError("Evidence source is not text") from error
         start, end = item.get("start_line"), item.get("end_line")

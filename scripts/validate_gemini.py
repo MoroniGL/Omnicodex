@@ -46,7 +46,8 @@ def _request() -> dict[str, Any]:
 def _verify_marker(pack: dict[str, Any], captured: scope.CapturedScope) -> None:
     if pack["status"] != "completed":
         raise ValueError("acceptance_not_completed")
-    entries = {entry.path: entry.data.splitlines() for entry in captured.entries}
+    entries = {entry.path: [line.encode("utf-8") for line in scope.source_lines(entry.data)]
+               for entry in captured.entries}
     cited = [line for finding in pack["findings"] for evidence in finding["evidence"]
              for line in entries[evidence["path"]][evidence["start_line"] - 1:evidence["end_line"]]]
     if not any(line == MARKER.rstrip(b"\n") for line in cited):

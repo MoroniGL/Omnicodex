@@ -143,6 +143,12 @@ rejections. Recognized `pack_schema_issue` codes identify the failed schema rule
 Provider parsing/HTTP codes are retained when available. Rejected packs and raw
 exception messages are never written to disk or included in diagnostics.
 
+Local acceptance verifies shape, bounds, identity, and budgets; it cannot prove
+that cited text supports a claim. The provider receives per-file line labels,
+but the parent must still verify every exact cited range. Reject unsupported
+claims and do not treat a model's `validation: passed` assertion as execution
+evidence: Gemini has no capability to run the tests.
+
 For HTTP request errors, `provider_error_hints` contains only fixed labels for
 terms in the provider message, such as `schema_enum`, `schema_complexity`,
 `json_schema`, or `api_key`. These are lexical hints, not a verified diagnosis.
