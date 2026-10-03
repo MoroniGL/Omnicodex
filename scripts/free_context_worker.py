@@ -121,12 +121,10 @@ def _write_json_new(path: Path, value: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
-def _gate(request: dict[str, Any], profile: str, efficiency: Any,
-          manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    # Cost eligibility is intentionally decided before runtime availability. A
-    # small task should remain native without requiring worker prerequisites.
+def _gate(request: dict[str, Any], profile: str, provider_available: bool,
+          efficiency: Any, manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     metrics = dict(request["metrics"])
-    metrics["provider_available"] = True
+    metrics["provider_available"] = provider_available
     plan = efficiency.make_offload_plan(manifest, metrics, profile)
     return metrics, plan
 
@@ -200,6 +198,7 @@ def _failure_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
         "task_kind": metrics["task_kind"],
         "route": "free_context_worker",
         "provider": "freellmapi",
+        "requested_provider": "freellmapi",
         "requested_model": "auto",
         "worker_outcome": execution.get("outcome", "validation_failed"),
         "worker_exit_status": execution.get("exit_code"),
@@ -217,6 +216,7 @@ def _failure_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
         "retry_count": telemetry.get("retry_count"),
         "fallback_count": telemetry.get("fallback_count"),
         "validation_result": "rejected",
+        "evidence_pack_status": None,
         "native_fallback_recommended": True,
         "snapshot_before": captured.fingerprint,
         "snapshot_after": snapshot_after,
@@ -236,6 +236,7 @@ def _success_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
     telemetry = execution["telemetry"]
     receipt.update({
         "mode": "live_token_offload_receipt",
+        "requested_provider": "freellmapi",
         "requested_model": "auto",
         "worker_outcome": execution["outcome"],
         "worker_exit_status": execution["exit_code"],
@@ -249,6 +250,7 @@ def _success_receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str
         "retry_count": telemetry["retry_count"],
         "fallback_count": telemetry["fallback_count"],
         "validation_result": "accepted",
+        "evidence_pack_status": pack["status"],
         "native_fallback_recommended": False,
         "snapshot_before": captured.fingerprint,
         "snapshot_after": snapshot_after,
@@ -305,12 +307,18 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
             "schema_version": 1, "status": "failed", "route": "native",
             "reason_code": "snapshot_mismatch", "quota_fallback": False,
         }, 3)
-    metrics, plan = _gate(request, profile, efficiency, manifest)
+    provider_available = key_configured and prefix is not None
+    metrics, plan = _gate(request, profile, provider_available, efficiency, manifest)
+    if not provider_available:
+        # Preserve the cost-gate reason for genuinely small work while still
+        # recording real provider availability in the production plan.
+        _, eligible_plan = _gate(request, profile, True, efficiency, manifest)
+        if eligible_plan["route"] != "free_context_worker":
+            return _fallback(eligible_plan), 0
+        missing = "missing_key" if not key_configured else "codex_unavailable"
+        return _fallback(plan, missing), 0
     if plan["route"] != "free_context_worker":
         return _fallback(plan), 0
-    missing = "missing_key" if not key_configured else "codex_unavailable" if prefix is None else None
-    if missing is not None:
-        return _fallback(plan, missing), 0
     adapter = _load_local("codex_exec_adapter")
     preview_argv = adapter.build_codex_exec_argv(
         prefix, Path("<staged-workspace>"), OUTPUT_SCHEMA, Path("<worker-output.json>"),
@@ -354,7 +362,12 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
     if not unchanged:
         reason = "workspace_mutated"
     elif execution["outcome"] != "completed":
-        reason = "worker_timeout" if execution["outcome"] == "timeout" else "worker_failed"
+        if execution["outcome"] == "timeout":
+            reason = "worker_timeout"
+        elif execution["outcome"] in {"missing_output", "stale_output"}:
+            reason = "invalid_pack"
+        else:
+            reason = "worker_failed"
     else:
         reason = ""
     pack: dict[str, Any] | None = None
@@ -383,8 +396,9 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
         return ({
             "schema_version": 1,
             "status": "failed",
-            "route": "free_context_worker",
+            "route": "native",
             "reason_code": reason,
+            "native_fallback_recommended": True,
             "artifacts": {"directory": str(artifact_dir), "receipt": "receipt.json"},
             "quota_fallback": False,
         }, 3)
@@ -403,10 +417,9 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
         pass
     return ({
         "schema_version": 1,
-        "status": "completed",
+        "status": pack["status"],
         "route": "free_context_worker",
         "snapshot": captured.fingerprint,
-        "summary": pack["summary"],
         "estimated_raw_tokens": plan["estimated_raw_tokens"],
         "estimated_evidence_pack_tokens": pack_tokens,
         "artifacts": {

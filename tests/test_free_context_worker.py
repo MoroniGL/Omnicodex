@@ -844,7 +844,7 @@ class WorkerOrchestrationTests(unittest.TestCase):
                 "assert (stage/'safe.txt').read_text() == 'unique-staged-marker\\n'\n"
                 "assert not (stage/'outside.txt').exists()\n"
                 "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'cached_input_tokens':0,'output_tokens':1,'reasoning_output_tokens':0}}))\n"
-                "out.write_text(json.dumps({'schema_version':1,'status':'completed','task_kind':'repo_scout','snapshot':sys.stdin.read().split('snapshot=')[1].split('\\n')[0],'summary':'ok','relevant_files':['safe.txt'],'findings':[{'claim':'marker','evidence':[{'path':'safe.txt','start_line':1,'end_line':1,'kind':'source'}]}],'risks':[],'unknowns':[],'validation':[]}))\n",
+                "out.write_text(json.dumps({'schema_version':1,'status':'completed','task_kind':'repo_scout','snapshot':sys.stdin.read().split('snapshot=')[1].split('\\n')[0],'summary':'unique-staged-marker','relevant_files':['safe.txt'],'findings':[{'claim':'marker','evidence':[{'path':'safe.txt','start_line':1,'end_line':1,'kind':'source'}]}],'risks':[],'unknowns':[],'validation':[]}))\n",
                 encoding="utf-8",
             )
             artifacts = base / "artifacts"
@@ -856,9 +856,10 @@ class WorkerOrchestrationTests(unittest.TestCase):
             pack = json.loads((artifacts / "evidence-pack.json").read_text(encoding="utf-8"))
         self.assertEqual(code, 0)
         self.assertEqual(result["status"], "completed")
-        self.assertEqual(pack["summary"], "ok")
+        self.assertEqual(pack["summary"], "unique-staged-marker")
         self.assertEqual(receipt["worker_outcome"], "completed")
         self.assertNotIn("not-in-result", json.dumps(result))
+        self.assertNotIn("unique-staged-marker", json.dumps(result))
 
     def test_missing_key_or_binary_falls_back_without_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -981,6 +982,8 @@ class WorkerOrchestrationTests(unittest.TestCase):
             count = counter.read_text(encoding="utf-8")
             evidence_pack_exists = (artifacts / "evidence-pack.json").exists()
         self.assertEqual((code, result["reason_code"]), (3, "invalid_pack"))
+        self.assertEqual(result["route"], "native")
+        self.assertTrue(result["native_fallback_recommended"])
         self.assertEqual(count, "x")
         self.assertTrue(receipt["native_fallback_recommended"])
         self.assertFalse(evidence_pack_exists)
@@ -1016,6 +1019,81 @@ class WorkerOrchestrationTests(unittest.TestCase):
             finally:
                 thread.join()
         self.assertEqual((code, result["reason_code"]), (3, "workspace_mutated"))
+        self.assertEqual(result["route"], "native")
+        self.assertTrue(result["native_fallback_recommended"])
+
+    def test_missing_pack_is_invalid_and_valid_noncompleted_status_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            missing = base / "missing.py"
+            missing.write_text("import json; print(json.dumps({'type':'turn.completed','usage':{}}))\n",
+                               encoding="utf-8")
+            result, code = self.worker().run_action(
+                "run", root, request, "balanced", (sys.executable, str(missing)),
+                base / "missing-artifacts", 2,
+                environment={"FREELLMAPI_API_KEY": "configured"},
+            )
+            self.assertEqual((code, result["reason_code"], result["route"]),
+                             (3, "invalid_pack", "native"))
+
+            blocked = base / "blocked.py"
+            blocked.write_text(
+                "import json,pathlib,sys\n"
+                "a=sys.argv; p=sys.stdin.read(); s=p.split('snapshot=')[1].split('\\n')[0]\n"
+                "pathlib.Path(a[a.index('--output-last-message')+1]).write_text(json.dumps({'schema_version':1,'status':'blocked','task_kind':'repo_scout','snapshot':s,'summary':'needs input','relevant_files':[],'findings':[],'risks':[],'unknowns':['not enough evidence'],'validation':[]}))\n",
+                encoding="utf-8",
+            )
+            blocked_result, blocked_code = self.worker().run_action(
+                "run", root, request, "balanced", (sys.executable, str(blocked)),
+                base / "blocked-artifacts", 2,
+                environment={"FREELLMAPI_API_KEY": "configured"},
+            )
+            blocked_receipt = json.loads(
+                (base / "blocked-artifacts" / "receipt.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual((blocked_code, blocked_result["status"], blocked_result["route"]),
+                         (0, "blocked", "free_context_worker"))
+        self.assertEqual(blocked_receipt["evidence_pack_status"], "blocked")
+
+    def test_worker_process_failures_map_transparently_without_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "repo"
+            root.mkdir()
+            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            request = base / "request.json"
+            request.write_text(json.dumps(self.request()), encoding="utf-8")
+            fake = base / "fail.py"
+            fake.write_text(
+                "import pathlib,sys,time\n"
+                "mode=sys.argv[1]; a=sys.argv\n"
+                "if mode == 'timeout': time.sleep(5)\n"
+                "elif mode == 'nonzero': sys.exit(7)\n"
+                "elif mode == 'oversize': pathlib.Path(a[a.index('--output-last-message')+1]).write_text('x'*262145)\n",
+                encoding="utf-8",
+            )
+            cases = {
+                "timeout": "worker_timeout",
+                "nonzero": "worker_failed",
+                "missing": "invalid_pack",
+                "oversize": "invalid_pack",
+            }
+            for mode, reason in cases.items():
+                with self.subTest(mode=mode):
+                    result, code = self.worker().run_action(
+                        "run", root, request, "balanced",
+                        (sys.executable, str(fake), mode), base / (mode + "-artifacts"),
+                        .15 if mode == "timeout" else 2,
+                        environment={"FREELLMAPI_API_KEY": "configured"},
+                    )
+                    self.assertEqual((code, result["reason_code"], result["route"]),
+                                     (3, reason, "native"))
+                    self.assertTrue(result["native_fallback_recommended"])
 
     def test_doctor_reports_local_prerequisites_without_live_claims_or_key(self):
         secret = "doctor-secret"
