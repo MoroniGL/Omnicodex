@@ -22,7 +22,7 @@ from .base import GenerationResult, ProviderError, safe_diagnostics
 
 
 API_URL_PREFIX = "https://generativelanguage.googleapis.com/v1beta/models/"
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_SCHEMA_BYTES = 65_536
 MAX_PROMPT_BYTES = 786_432

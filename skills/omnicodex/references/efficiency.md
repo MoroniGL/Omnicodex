@@ -97,7 +97,7 @@ For a large, explicitly approved scope, capture only approved repo-relative
 files deterministically and send that immutable capture to Gemini Direct. The
 provider returns a compact EvidencePack; the premium parent must inspect cited
 source and retain final acceptance. Use `GEMINI_API_KEY` from the environment
-only. `OMNICODEX_GEMINI_MODEL` defaults to `gemini-2.5-flash-lite`.
+only. `OMNICODEX_GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`.
 
 The offline status JSON distinguishes `native_status: "READY"` from
 `free_context_offload: "READY"` or `"NOT CONFIGURED"`, and includes the safe

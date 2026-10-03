@@ -110,8 +110,8 @@ rejected, and the parent is never switched. Setup is environment only:
 
 ```sh
 export GEMINI_API_KEY='set-locally-never-commit'
-# Optional; defaults to gemini-2.5-flash-lite
-export OMNICODEX_GEMINI_MODEL='gemini-2.5-flash-lite'
+# Optional; defaults to gemini-3.5-flash-lite
+export OMNICODEX_GEMINI_MODEL='gemini-3.5-flash-lite'
 python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
 ```
 

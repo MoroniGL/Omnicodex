@@ -109,7 +109,7 @@ The report must show `native_status: "READY"` and
 it does not prove a network request or account access.
 
 For a controlled Windows acceptance, set `GEMINI_API_KEY` in the current shell.
-Optionally set `OMNICODEX_GEMINI_MODEL`; it defaults to `gemini-2.5-flash-lite`.
+Optionally set `OMNICODEX_GEMINI_MODEL`; it defaults to `gemini-3.5-flash-lite`.
 Then run the repository validation script, which sends a small EvidencePack case
 and a roughly 45k-token synthetic case:
 
@@ -127,6 +127,14 @@ API status/reason codes, or a fixed transport category such as `tls_error` or
 `dns_error`. It never includes raw response messages, headers, error metadata,
 exception text, or the key. Unknown diagnostic codes are omitted. Configuration
 READY still does not mean connectivity has been verified.
+
+HTTP 404 / `NOT_FOUND` for `gemini-2.5-flash-lite` can reflect model access:
+[Google limits Gemini 2.5 access to existing users](https://ai.google.dev/gemini-api/docs/deprecations)
+and recommends `gemini-3.5-flash-lite` for new projects (checked 2026-10-03).
+This is the current default; an explicit model override remains supported.
+Use the project's available models and API billing tier, rather than a Gemini
+application subscription name, to assess account access. Never switch models
+automatically after a failed request.
 
 For manual investigation, create a disposable workspace and request outside it:
 

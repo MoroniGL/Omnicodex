@@ -48,7 +48,7 @@ snapshot, and EvidencePack schema. The provider has no workspace, shell, tool,
 or Git access. The primary route starts no nested Codex process and requires no
 WSL, Ubuntu, Docker, or OS sandbox. `GEMINI_API_KEY` is read from the environment
 only; `OMNICODEX_GEMINI_MODEL` selects the model and defaults to
-`gemini-2.5-flash-lite`.
+`gemini-3.5-flash-lite`.
 
 The local validator rejects unknown fields, wrong task/snapshot, out-of-scope
 files, invalid or missing line evidence, oversized packs, and a changed source

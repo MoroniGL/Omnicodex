@@ -170,12 +170,12 @@ class GeminiProviderTests(unittest.TestCase):
         result = self.provider(transport).generate_evidence_pack(task(), scope(), schema(), limits())
         self.assertEqual(result.pack, {"summary": "safe"})
         self.assertEqual(result.telemetry, {
-            "requested_provider": "gemini_direct", "requested_model": "gemini-2.5-flash-lite",
+            "requested_provider": "gemini_direct", "requested_model": "gemini-3.5-flash-lite",
             "retry_count": 0, "input_tokens": 11, "output_tokens": 7,
             "served_model": "gemini-2.5-flash-lite-001", "elapsed_ms": 125,
         })
         url, body, headers, timeout = transport.calls[0]
-        self.assertEqual(url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent")
+        self.assertEqual(url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent")
         self.assertEqual(headers, {"Content-Type": "application/json", "x-goog-api-key": SECRET})
         self.assertEqual(timeout, 5.0)
         payload = json.loads(body)
@@ -232,7 +232,7 @@ class GeminiProviderTests(unittest.TestCase):
     def test_missing_key_does_not_request_or_leak_configuration(self):
         transport = RecordingTransport(TransportResponse(200, {}, response()))
         provider = GeminiProvider(environment={}, transport=transport)
-        self.assertEqual(provider.status(), {"provider": "gemini_direct", "model": "gemini-2.5-flash-lite", "configured": False})
+        self.assertEqual(provider.status(), {"provider": "gemini_direct", "model": "gemini-3.5-flash-lite", "configured": False})
         with self.assertRaises(ProviderError) as raised:
             provider.generate_evidence_pack(task(), scope(), schema(), limits())
         self.assertEqual(raised.exception.reason_code, "provider_not_configured")

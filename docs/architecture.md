@@ -73,6 +73,6 @@ until the premium parent verifies exact cited ranges. Workspace hashes cover the
 captured files and approved directory membership, without reading other files.
 
 `GEMINI_API_KEY` is the only credential input. `OMNICODEX_GEMINI_MODEL` is
-optional and defaults to `gemini-2.5-flash-lite`. Local configuration status is
+optional and defaults to `gemini-3.5-flash-lite`. Local configuration status is
 not connectivity or billing evidence. The optional future FreeLLMAPI adapter is
 not an installation dependency.

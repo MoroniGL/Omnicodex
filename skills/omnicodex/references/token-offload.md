@@ -17,7 +17,7 @@ Offload only when all of these are true:
 - The narrowed scope has no credentials, `.env` data, private keys, auth material,
   sensitive dumps, binary files, or unrelated conversation/environment history.
 - `GEMINI_API_KEY` is nonempty in the local environment. `OMNICODEX_GEMINI_MODEL`
-  is optional and defaults to `gemini-2.5-flash-lite`.
+  is optional and defaults to `gemini-3.5-flash-lite`.
 
 If any condition is false, stay on the native premium-parent path. Do not ask for
 offload merely because quota, rate limits, or allowance are exhausted.
