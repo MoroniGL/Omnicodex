@@ -164,6 +164,91 @@ class LiveValidationTests(unittest.TestCase):
                     transport=self.transport(calls), profile=profile, timeout_seconds=timeout)
         self.assertEqual(calls, [])
 
+    def test_request_diagnostics_compare_one_variable_per_case_with_same_scope(self):
+        calls = []
+        report, code = validate_gemini.run_request_diagnostics(
+            environment={"GEMINI_API_KEY": "acceptance-key"}, transport=self.transport(calls))
+        self.assertEqual(code, 0)
+        self.assertEqual(report["network_requests"], 4)
+        self.assertEqual([case["case"] for case in report["cases"]],
+            ["full_schema", "minimal_schema", "full_schema_without_array_bounds", "minimal_current_format"])
+        self.assertTrue(all(case["http_success"] for case in report["cases"]))
+        self.assertFalse(report["acceptance_verified"])
+        self.assertTrue(report["workspace_hash_unchanged"])
+        self.assertEqual(len({json.dumps(call["contents"]) for call in calls}), 1)
+        full = calls[0]["generationConfig"]["responseJsonSchema"]
+        minimal = calls[1]["generationConfig"]["responseJsonSchema"]
+        relaxed = calls[2]["generationConfig"]["responseJsonSchema"]
+        self.assertEqual(set(minimal["properties"]), {"summary"})
+        self.assertIn("maxItems", json.dumps(full))
+        self.assertNotIn("maxItems", json.dumps(relaxed))
+        self.assertNotIn("minItems", json.dumps(relaxed))
+        modern = calls[3]["generationConfig"]
+        self.assertEqual(modern["responseFormat"], {"text": {"mimeType": "application/json", "schema": minimal}})
+        self.assertNotIn("responseJsonSchema", modern)
+        self.assertNotIn("responseMimeType", modern)
+        self.assertNotIn("acceptance-key", json.dumps(report))
+
+    def test_request_diagnostics_keep_http_success_distinct_from_pack_validation(self):
+        calls = []
+        def send(url, body, headers, timeout):
+            calls.append(json.loads(body))
+            return (200, {}, b'{"candidates":[]}')
+        report, code = validate_gemini.run_request_diagnostics(
+            environment={"GEMINI_API_KEY": "acceptance-key"}, transport=send)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(case["http_success"] for case in report["cases"]))
+        self.assertTrue(all(case["reason_code"] == "invalid_pack" for case in report["cases"]))
+        self.assertFalse(report["acceptance_verified"])
+
+    def test_request_diagnostics_report_each_rejection_without_messages(self):
+        body = b'{"error":{"status":"INVALID_ARGUMENT","message":"unsafe acceptance-key"}}'
+        report, code = validate_gemini.run_request_diagnostics(
+            environment={"GEMINI_API_KEY": "acceptance-key"}, transport=lambda *args: (400, {}, body))
+        self.assertEqual(code, 0)
+        self.assertEqual(report["status"], "diagnostic_complete")
+        self.assertTrue(all(not case["http_success"] for case in report["cases"]))
+        self.assertTrue(all(case["provider_http_status"] == 400 for case in report["cases"]))
+        self.assertNotIn("acceptance-key", json.dumps(report))
+
+    def test_request_diagnostics_require_configuration_and_valid_timeout(self):
+        calls = []
+        report, code = validate_gemini.run_request_diagnostics(environment={}, transport=self.transport(calls))
+        self.assertEqual(code, 2)
+        self.assertEqual(report["status"], "not_configured")
+        for timeout in (0, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                validate_gemini.run_request_diagnostics(environment={}, timeout_seconds=timeout)
+        self.assertEqual(calls, [])
+
+    def test_request_diagnostics_stop_on_auth_quota_or_transport_failures(self):
+        for status in (401, 403, 429, None):
+            calls = []
+            def send(*args):
+                calls.append(args)
+                if status is None:
+                    raise OSError("unsafe acceptance-key")
+                return (status, {}, b"{}")
+            with self.subTest(status=status):
+                report, code = validate_gemini.run_request_diagnostics(
+                    environment={"GEMINI_API_KEY": "acceptance-key"}, transport=send)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(report["network_requests"], 1)
+                self.assertNotIn("acceptance-key", json.dumps(report))
+
+    def test_diagnostic_cli_dispatch_is_explicit(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest.mock import patch
+        with patch.object(validate_gemini, "run_request_diagnostics", return_value=({}, 0)) as diagnostic, \
+                patch.object(validate_gemini, "run_validation", return_value=({}, 0)) as acceptance, \
+                redirect_stdout(StringIO()):
+            self.assertEqual(validate_gemini.main(["--diagnose-request", "--timeout", "30"]), 0)
+            diagnostic.assert_called_once_with(timeout_seconds=30.0)
+            acceptance.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

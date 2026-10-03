@@ -133,6 +133,21 @@ terms in the provider message, such as `schema_enum`, `schema_complexity`,
 `json_schema`, or `api_key`. These are lexical hints, not a verified diagnosis.
 No message excerpt is returned; unknown terms and oversized messages are omitted.
 
+For an unexplained HTTP 400, explicitly compare synthetic request variants:
+
+```powershell
+python scripts/validate_gemini.py --diagnose-request --timeout 30
+```
+
+This sends up to four small requests with identical model, task, captured data,
+and token settings: full schema; minimal schema; full schema without array
+bounds; and the same minimal schema using the current documented `responseFormat`
+field. It stops on authentication, quota, credential, timeout, or transport errors.
+It reports only HTTP outcomes and safe error codes; responses are discarded.
+`diagnostic_complete` means the diagnostic ran, while `acceptance_verified` stays
+false. No production schema, model, or fallback policy is changed. Rerun normal
+acceptance after any confirmed provider compatibility fix.
+
 HTTP 404 / `NOT_FOUND` for `gemini-2.5-flash-lite` can reflect model access:
 [Google limits Gemini 2.5 access to existing users](https://ai.google.dev/gemini-api/docs/deprecations)
 and recommends `gemini-3.5-flash-lite` for new projects (checked 2026-10-03).
