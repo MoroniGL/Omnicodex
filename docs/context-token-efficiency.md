@@ -24,10 +24,10 @@ provider never changes the orchestrator or authorizes a more expensive model.
 The existing model/profile TOML templates still need installation-specific runtime
 validation. Auto in this increment is not an automatic model-switching engine.
 
-## FreeLLMAPI token-offload path
+## Gemini Direct token-offload path
 
-FreeLLMAPI is an optional context reader, never the OmniCodex root provider and
-never a response to OpenAI quota exhaustion.
+Gemini Direct is an optional external EvidencePack generator. It never replaces
+the OmniCodex parent and never responds to OpenAI quota exhaustion.
 
 ```text
 premium parent
@@ -36,33 +36,26 @@ premium parent
   -> measured ContextCostGate
      -> small/ineligible: native parent path
      -> large + approved + nonsensitive
-        -> private staged copy
-        -> one ephemeral read-only Codex exec using FreeLLMAPI
+        -> immutable approved capture
+        -> one direct Gemini HTTPS request
         -> local EvidencePack validation + workspace re-snapshot
         -> compact pack to parent
         -> parent opens exact cited ranges and accepts or rejects
 ```
 
-The original source bytes are not placed in the prompt. The worker receives the
-task kind, concise objective, approved repo-relative names, snapshot, and pack
-budgets, then reads the staged files itself. `--ephemeral`, `--output-schema`,
-JSONL events, `--output-last-message`, and per-invocation
-provider overrides isolate the worker without changing global or parent provider
-configuration. A strict per-invocation permission profile denies the filesystem
-root, grants only Codex's minimal runtime paths plus the exact staged directory,
-and disables model-initiated network tools. Unsupported configuration fails
-closed because `--strict-config` is used. Web search is disabled and the staged
-workspace has no Git state.
-
-Current Codex permission profiles and the older `--sandbox` flag are mutually
-exclusive. The worker deliberately omits `--sandbox` so the narrower custom
-profile remains active; `-a never` rejects escalation requests.
+Only the deterministic capture is supplied to Gemini, together with the task,
+snapshot, and EvidencePack schema. The provider has no workspace, shell, tool,
+or Git access. The primary route starts no nested Codex process and requires no
+WSL, Ubuntu, Docker, or OS sandbox. `GEMINI_API_KEY` is read from the environment
+only; `OMNICODEX_GEMINI_MODEL` selects the model and defaults to
+`gemini-2.5-flash-lite`.
 
 The local validator rejects unknown fields, wrong task/snapshot, out-of-scope
 files, invalid or missing line evidence, oversized packs, and a changed source
 snapshot. The final acceptance check counts the UTF-8 bytes in the pack plus the
-union of cited source ranges; that compact handoff must be smaller than the
-captured raw scope. A failed or stale pack is never promoted to evidence.
+union of cited source ranges; that compact handoff must be at most 80% of the
+captured raw estimate, preserving a minimum 20% estimated reduction. A failed or
+stale pack is never promoted to evidence.
 
 ## Provider contracts
 
@@ -73,11 +66,11 @@ captured raw scope. A failed or stale pack is never promoted to evidence.
 | RTK | Documented follow-on only | Future command-specific compatibility and exit-code tests | No automatic rewrite |
 | Caveman-inspired brevity | Original structured handoff policy | Keep evidence, identifiers and failures intact | Longer report when necessary |
 | Desktop Commander | Optional future tool provider | Actual host permissions, not just prompt instructions | Native tools |
-| FreeLLMAPI | Direct read-only processing of large approved context | ContextCostGate, explicit externalization approval, privacy scan, immutable scope, valid EvidencePack | Native parent path with transparent reason/status |
+| Gemini Direct | Direct generation of a compact pack from an immutable approved capture | ContextCostGate, explicit externalization approval, privacy scan, immutable scope, valid EvidencePack | Native parent path with transparent reason/status |
 
-Provider code is not vendored. Upstream licenses and installation/release checks
-remain the user's responsibility when installing those separate projects. The
-OmniCodex policy is original; no upstream performance claim is adopted as our own.
+The Gemini Direct provider is a small standard-library implementation bundled
+with OmniCodex. Context Mode and codebase-memory-mcp remain optional upstream
+tools; their installation, compatibility, and performance claims are separate.
 
 ## Runtime integration
 
@@ -129,14 +122,12 @@ The installed live-worker diagnostic is also offline:
 python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
 ```
 
-It reports whether `codex` and `FREELLMAPI_API_KEY` are locally available. It
-does not contact FreeLLMAPI, expose the key, verify a runtime model, or claim a
-working gateway. `dry-run` validates a bounded request, captures its approved
-scope, runs the gate, and displays a sanitized command without making a network
-request. `run` invokes one Codex worker process; it never loops across identical
-failures or promotes FreeLLMAPI to orchestrator. FreeLLMAPI may perform its own
-provider routing, which is outside OmniCodex's retry control and is recorded only
-when reliable runtime telemetry exposes it.
+Its JSON reports `native_status: "READY"` and `free_context_offload: "READY"` or
+`"NOT CONFIGURED"`, with the safe configured provider/model. It does not contact
+Gemini, expose the key, or verify connectivity. `dry-run` validates a bounded
+request and captures its approved scope without network access. `run` sends one
+direct request and never loops across identical failures or promotes Gemini to
+orchestrator.
 
 With no inventory and explicit provider opt-in, plans select native tools. To
 exercise the decision logic with **synthetic data only**:
@@ -155,22 +146,27 @@ optional selection even when tools are reported available.
 
 ## Privacy and credential boundary
 
-FreeLLMAPI can route to third-party free providers. Public workspaces and
-explicitly approved private workspaces are eligible. Private workspaces without
+Gemini Direct is a paid API integration and may incur billing. A free model name
+does not establish free-tier account eligibility. Public workspaces and explicitly
+approved private workspaces are eligible. Private workspaces without
 approval stay native. Sensitive paths or content fail closed, including `.env`,
 credentials/tokens/passwords, private keys, auth files, secret-bearing dumps,
 binary files, and unrelated conversation or environment history.
 
-`FREELLMAPI_API_KEY` remains in the process environment. It is never written to
-the request, argv, prompt, receipt, or installed configuration. The Codex model
-provider receives it, while the worker's shell environment policy explicitly
-excludes it from model-initiated commands. Provider output is checked for the
-credential before any result is accepted.
+`GEMINI_API_KEY` remains in the process environment. It is never written to the
+request, argv, prompt, receipt, or installed configuration. Provider output is
+checked for the credential before any result is accepted.
 
 Path and content screening is a bounded fail-closed safeguard, not a substitute
 for correct workspace classification. Operators must not approve a scope whose
 sensitivity is uncertain. Detected sensitive names, bytes, links/reparse points,
 binary content, or credentials reject the entire candidate scope.
+
+Scope hashes cover only entries accepted after directory-membership checks; the
+worker does not read unrelated workspace files to create or verify a capture.
+Instruction-blacklist screening is heuristic, not a comprehensive injection
+detector. Provider prose remains an untrusted locator until the premium parent
+opens and verifies each cited source range.
 
 ## Receipts and failure behavior
 
@@ -185,7 +181,7 @@ and retry/fallback counts remain `null` unless reliable runtime evidence exposes
 them. Root usage is recorded separately when available; billing and subscription
 allowance are always unverified unless measured elsewhere.
 
-Missing key/Codex produces a transparent native fallback. Unavailable gateway,
+Missing key produces a transparent native fallback. Unavailable Gemini service,
 timeout, nonzero exit, malformed output, credential leakage, invalid evidence,
 or workspace mutation produces a failed receipt and recommends native handling.
 There is no destructive retry and no quota-triggered route.
@@ -243,3 +239,8 @@ These are upstream documentation observations, not live compatibility results.
 6. [OpenAI Codex permission profiles](https://learn.chatgpt.com/docs/permissions):
    current profile syntax, filesystem precedence, platform enforcement, and the
    non-composition rule for the older `--sandbox` settings; checked 2026-10-03.
+7. [Gemini generateContent API](https://ai.google.dev/api/generate-content) and
+   [structured JSON output](https://ai.google.dev/gemini-api/docs/structured-output):
+   the direct provider uses header authentication, a compatible schema projection,
+   and response usage/model metadata; checked 2026-10-03. The canonical local
+   EvidencePack validator enforces constraints omitted from the API schema subset.

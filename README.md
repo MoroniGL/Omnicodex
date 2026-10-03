@@ -54,6 +54,11 @@ This installs OmniCodex assets only. It does not install or register optional MC
 servers, change hooks, or switch the model of an already-running conversation.
 Review [installation and rollback](docs/local-validation.md) before replacing files.
 
+Native OmniCodex installs and works without a Gemini key. There is no WSL,
+Ubuntu, Docker, FreeLLMAPI Desktop, or second Codex installation requirement.
+Gemini Direct offload is optional; missing configuration reports `NOT CONFIGURED`
+and leaves native routing available.
+
 Start a **new CLI session**:
 
 ```sh
@@ -93,33 +98,38 @@ supplied evidence. Neither proves live MCP access or changes a model.
 Read the [efficiency architecture](docs/context-token-efficiency.md) and
 [benchmark protocol](docs/efficiency-benchmark.md).
 
-### Optional FreeLLMAPI context worker
+### Optional Gemini Direct context worker
 
-For an explicitly approved public or private workspace, OmniCodex can send a
-bounded metadata-only task to an isolated `codex exec` worker configured for a
-local FreeLLMAPI gateway. The worker reads a private staged copy directly and
-returns a source-linked EvidencePack. The premium parent still owns planning,
-implementation, consequential decisions, evidence inspection, and acceptance.
+For an explicitly approved public or private workspace, OmniCodex can send an
+immutable bounded capture to Gemini Direct over HTTPS and receive a source-linked
+EvidencePack. The premium parent still owns planning, implementation,
+consequential decisions, evidence inspection, and acceptance.
 
 This is not quota fallback. Small tasks stay native, sensitive content is
-rejected, and the parent is never switched to FreeLLMAPI. Setup is environment
-only:
+rejected, and the parent is never switched. Setup is environment only:
 
 ```sh
-export FREELLMAPI_API_KEY='set-locally-never-commit'
-# Optional; defaults to http://127.0.0.1:3001/v1
-export FREELLMAPI_BASE_URL='http://127.0.0.1:3001/v1'
+export GEMINI_API_KEY='set-locally-never-commit'
+# Optional; defaults to gemini-2.5-flash-lite
+export OMNICODEX_GEMINI_MODEL='gemini-2.5-flash-lite'
 python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
 ```
 
-`doctor` is offline: it reports only local key/Codex prerequisites and does not
-probe the gateway or verify a served model. See the
+`doctor` is offline: its JSON reports `native_status: "READY"` and
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, plus provider/model
+configuration. It does not probe connectivity or verify a served model. A
+configured key is local configuration only. See the
 [architecture and privacy contract](docs/context-token-efficiency.md) and the
 [controlled acceptance procedure](docs/local-validation.md).
 
-`omni status` continues to report the saved/session profile policy and actual
-parent metadata when available; it does not claim the optional worker or gateway
-is live. Use the worker's `doctor` action for its separate local prerequisites.
+`omni status` includes the same offline Gemini Direct configuration distinction.
+It does not claim the optional worker is connected or live.
+
+`python scripts/validate_gemini.py` is the explicit live acceptance command. It
+makes two requests only when local status is READY: a small connectivity probe
+that leaves ordinary small work native, and a roughly 45k-token synthetic gate
+case. No live Gemini result is claimed in this repository; READY is local
+configuration only.
 
 ## Validation and limitations
 
@@ -135,9 +145,9 @@ is live. Use the worker's `doctor` action for its separate local prerequisites.
 - Context Mode and codebase-memory-mcp were not configured in the latest Mac test.
   Live integration, quality comparisons, token/allowance savings, and cross-client
   compatibility remain unverified. No new Max/Astra probe is part of this release preparation.
-- The FreeLLMAPI worker has comprehensive offline coverage. A real gateway test
-  must only be claimed when a running gateway and environment key were actually
-  present; worker estimates are not verified billing or subscription savings.
+- The Gemini Direct worker has comprehensive offline coverage. A real provider
+  test must only be claimed when a configured key and connectivity validation ran;
+  estimated context reduction is not verified billing or subscription savings.
 - RTK automatic rewriting, persistent project memory, and automatic MCP setup are
   not implemented. Claude Code cannot use these Codex model/profile files as-is.
 

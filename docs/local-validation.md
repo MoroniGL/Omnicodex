@@ -9,7 +9,7 @@ Validated with Codex CLI **0.153.4** on macOS. This is a routing smoke test, not
 | `agents/*.toml` | `$CODEX_HOME/agents/*.toml` (default `~/.codex/agents/`) |
 | `profiles/*.config.toml` | `$CODEX_HOME/omnicodex-<profile>.config.toml` |
 | `skills/omnicodex/SKILL.md` | `~/.agents/skills/omnicodex/SKILL.md` |
-| Token-offload runtime scripts | `$CODEX_HOME/omnicodex/scripts/` |
+| Token-offload runtime scripts and Gemini provider package | `$CODEX_HOME/omnicodex/scripts/` |
 | `integrations/efficiency.json` | `$CODEX_HOME/omnicodex/integrations/efficiency.json` |
 | `schemas/evidence-pack.schema.json` | `$CODEX_HOME/omnicodex/schemas/evidence-pack.schema.json` |
 
@@ -73,13 +73,28 @@ For rollback, remove only files introduced by this installation whose current ha
 
 Official references: [Custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents) and [configuration samples](https://developers.openai.com/codex/config-sample).
 
-## FreeLLMAPI worker validation
+## Gemini Direct worker validation
 
-The worker uses the existing Codex Responses integration per invocation. It does
+Windows offline refactor validation on 2026-10-03 passed 244 unit tests, including
+65 direct-provider/worker/mocked-live tests, 23 installer/setup tests, 114
+routing/profile tests, and 42 retained scope/legacy-adapter tests. `compileall`,
+manifest/example-pack validation, and `git diff --check` passed. Independent
+review accepted the implementation after fixing privacy, parser, telemetry,
+deadline-reader, and HTTP connection-lifecycle regressions. No real Gemini call
+was made: this executor had no configured key. The project-specified
+`npx @Codex-flow/cli@latest security scan` could not run because npm rejects that
+package name and returned 404; the security regression suite and independent
+review provide the available local evidence.
+
+Credential and instruction scans are heuristic, so explicit scope approval,
+correct classification, and premium source verification remain required. The
+HTTP response reader refreshes the remaining deadline before each socket read;
+OS DNS and connection/TLS setup retain platform blocking behavior and may exceed
+an exact whole-operation deadline.
+
+The worker calls Gemini Direct from a deterministic immutable capture. It does
 not replace the root provider or write credentials/provider configuration to
-disk. Its required `codex exec` flag surface was rechecked with Codex CLI 0.160.0
-on Windows on 2026-10-03; that check did not exercise a live gateway. First
-verify offline prerequisites:
+disk. First verify offline prerequisites:
 
 ```powershell
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
@@ -87,13 +102,27 @@ $worker = Join-Path $codexHome 'omnicodex\scripts\free_context_worker.py'
 python $worker doctor
 ```
 
-`key_configured` and `codex_available` must be true before a live run.
-`gateway_probed` and `runtime_model_verified` intentionally remain false in
-doctor output.
+The report must show `native_status: "READY"` and
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, along with
+`gemini_direct`, the configured model, `key_configured`, and
+`connectivity_verified: false`. READY means the local environment is configured;
+it does not prove a network request or account access.
 
-For a controlled Windows acceptance, start the local FreeLLMAPI gateway and set
-`FREELLMAPI_API_KEY` in the current shell. Set `FREELLMAPI_BASE_URL` only for a
-non-default gateway. Then create a disposable workspace and request outside it:
+For a controlled Windows acceptance, set `GEMINI_API_KEY` in the current shell.
+Optionally set `OMNICODEX_GEMINI_MODEL`; it defaults to `gemini-2.5-flash-lite`.
+Then run the repository validation script, which sends a small EvidencePack case
+and a roughly 45k-token synthetic case:
+
+```powershell
+python scripts/validate_gemini.py
+```
+
+It reports estimates separately from actual provider usage, which appears only
+when Gemini returns usage metadata. The command may incur API billing; a model
+name does not guarantee that the account has a free tier. The test uses only its
+synthetic approved workspace and never reads unapproved files.
+
+For manual investigation, create a disposable workspace and request outside it:
 
 ```powershell
 $case = Join-Path ([IO.Path]::GetTempPath()) ('omnicodex-live-' + [guid]::NewGuid())
@@ -130,16 +159,11 @@ Get-Content (Join-Path $artifacts 'receipt.json')
 
 Accept the live test only if the dry run selected `free_context_worker`, the run
 created a locally valid pack, source hashes match, evidence ranges resolve, and
-the receipt reports an accepted single worker run. Confirm the pack is compact
-and contains no full source. Confirm the receipt's combined pack-plus-citations
-estimate is smaller than the captured raw estimate. Review the command preview
-for the stage-only permission profile: root denied, minimal runtime paths and the
-exact temporary stage readable, network disabled, `-a never`, and no `--sandbox`
-flag that would override the permission profile. A controlled gateway acceptance
-must also instruct the worker
-to attempt reading a known synthetic file outside the stage and verify that the
-attempt is denied without exposing that file's contents. Record requested model
-`auto`; record served
-provider/model only when supported runtime evidence—not worker prose—provides
-it. Actual root usage will commonly remain `null`. Never print the environment
-key, and verify the user's global Codex config hash is unchanged.
+the receipt reports one accepted Gemini Direct request. Confirm the pack is
+compact and contains no full source. Confirm the receipt's combined
+pack-plus-citations estimate retains at least a 20% estimated reduction from the
+captured raw estimate. Record
+requested and served provider/model only when direct provider metadata provides
+them. Never print the environment key. The worker only captures the explicitly
+approved scope, so the validation must not rely on access to any other workspace
+file.

@@ -51,16 +51,16 @@ OmniCodex will not silently depend on undocumented model-switching behavior.
 - [x] Define an offline ContextCostGate with profile-specific starting thresholds.
 - [x] Define a bounded, source-linked EvidencePack contract.
 - [x] Require workspace opt-in and block sensitive external offload.
-- [x] Explicitly exclude quota fallback from the FreeLLMAPI context-worker route.
+- [x] Explicitly exclude quota fallback from the Gemini Direct context-worker route.
 - [x] Add estimated context-avoidance receipts without claiming billing savings.
 - [x] Refactor the root routing skill toward progressive disclosure for GPT-6-era models.
-- [x] Connect an optional read-only FreeLLMAPI Codex worker using the existing Responses integration.
-- [x] Prove offline that the worker reads a bounded staged workspace directly rather than receiving source in its prompt.
+- [x] Connect an optional read-only Gemini Direct worker through a direct HTTP provider.
+- [x] Prove offline that the worker sends only a bounded immutable capture rather than source outside the approved scope.
 - [x] Record requested route, worker usage when exposed, latency, failures, and local validation status.
 - [x] Gate on captured scope metrics and enforce pack-plus-citations context reduction.
-- [x] Apply a strict stage-only Codex permission profile to the live worker invocation.
+- [x] Remove the nested Codex worker and its stage-only permission profile from the primary route.
 - [ ] Verify served model/provider, root usage, and acceptance quality in controlled live benchmarks.
 - [ ] Tune thresholds from representative Windows benchmarks.
 - [ ] Evaluate GPT-6.1 Sol / GPT-6 Luna profile migrations separately from the offload worker.
 - [ ] Package the stable OmniCodex stack as a Codex/ChatGPT plugin with trusted lifecycle hooks.
-- [ ] Complete controlled live-gateway acceptance on Windows and publish measured rows without billing claims.
+- [ ] Complete controlled Gemini Direct acceptance on Windows and publish measured rows without billing claims.

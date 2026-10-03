@@ -2,9 +2,9 @@
 
 Use this progressive workflow automatically when a large read-only repository
 slice, diff, log, or document set would otherwise enter the premium parent's
-context. The installed runtime is under `$CODEX_HOME/omnicodex/`. FreeLLMAPI is an
-optional context reader: it never replaces the premium parent and is never an
-OpenAI quota fallback.
+context. The installed runtime is under `$CODEX_HOME/omnicodex/`. Gemini Direct is
+an optional EvidencePack provider: it never replaces the premium parent and is
+never an OpenAI quota fallback.
 
 ## Preconditions
 
@@ -16,9 +16,8 @@ Offload only when all of these are true:
   user or workspace policy explicitly approves external offload.
 - The narrowed scope has no credentials, `.env` data, private keys, auth material,
   sensitive dumps, binary files, or unrelated conversation/environment history.
-- `FREELLMAPI_API_KEY` is nonempty in the local environment and a usable `codex`
-  binary is available. `FREELLMAPI_BASE_URL` is optional and defaults to
-  `http://127.0.0.1:3001/v1`.
+- `GEMINI_API_KEY` is nonempty in the local environment. `OMNICODEX_GEMINI_MODEL`
+  is optional and defaults to `gemini-2.5-flash-lite`.
 
 If any condition is false, stay on the native premium-parent path. Do not ask for
 offload merely because quota, rate limits, or allowance are exhausted.
@@ -37,19 +36,15 @@ offload merely because quota, rate limits, or allowance are exhausted.
    calculates the profile threshold, and makes zero network requests. Callers
    never set `provider_available` themselves.
 4. **Invoke once.** Only a `ready` result with route `free_context_worker` permits
-   `run`. The runtime stages the immutable approved scope outside the repository
-   and starts one isolated, read-only, no-web Codex subprocess with model `auto`.
-   Its strict permission profile denies root access and permits only minimal Codex
-   runtime paths plus that exact staged copy; model-initiated network access and
-   escalation requests are denied. Current Codex treats the older `--sandbox`
-   flag as an override, so the worker intentionally uses the custom profile
-   without that flag.
-   Do not retry with another provider or model.
+   `run`. The runtime sends the immutable approved capture in one direct Gemini
+   HTTPS request and receives a compact EvidencePack. Gemini has no workspace,
+   shell, tool, or Git access. No nested Codex, WSL, Ubuntu, Docker, or OS sandbox
+   is required. Do not retry with another provider or model.
 5. **Validate locally.** Accept output only after schema, task kind, snapshot,
    token budget, captured-file subset, source existence, line bounds, and a second
    workspace fingerprint check all pass. The UTF-8 pack estimate plus the union of
-   cited source ranges must also be smaller than the captured raw estimate. A
-   failure recommends the native path; it
+   cited source ranges must retain at least a 20% estimated reduction from the
+   captured raw estimate. A failure recommends the native path; it
    does not make untrusted worker prose evidence.
 6. **Open exact evidence.** Read only the cited repo-relative file/line ranges
    needed to verify claims. The EvidencePack summary is a locator, not proof.
@@ -92,8 +87,10 @@ fingerprint.
 
 ## Commands
 
-`doctor` is offline and reports local prerequisites only. It does not probe the
-gateway or verify the served provider/model.
+`doctor` is offline and its JSON reports `native_status: "READY"` plus
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, with provider/model
+configuration. It does not probe connectivity or verify the served provider/model;
+READY with a key is local configuration only.
 
 ```sh
 python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
@@ -121,14 +118,14 @@ python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" run \
   --timeout 120
 ```
 
-Use `--codex /absolute/path/to/codex` only for an explicit binary; otherwise
-resolution is `OMNICODEX_CODEX_PATH`, then `PATH`. Never put the API key in a
-request, command argument, prompt, receipt, or committed file.
+Never put the API key in a request, command argument, prompt, receipt, or
+committed file. `GEMINI_API_KEY` may incur billing; a model name does not
+guarantee free-tier account eligibility.
 
 ## Result handling
 
-- `fallback` / `native` with exit 0 means the gate declined, the key is missing,
-  or Codex is unavailable. Continue natively; no worker started.
+- `fallback` / `native` with exit 0 means the gate declined or the key is missing.
+  Continue natively; no provider request started.
 - `completed` with route `free_context_worker` means the local EvidencePack was
   accepted. Retrieve `evidence-pack.json` and `receipt.json` from the returned
   artifact directory, then inspect exact cited ranges in the original workspace.
@@ -154,14 +151,19 @@ The canonical schema is
 `$CODEX_HOME/omnicodex/schemas/evidence-pack.schema.json`. Completed findings use
 concise claims and one or more approved repo-relative file/line references. Raw
 source and logs stay in the original workspace; whole files and raw logs do not
-belong in the pack. Risks, unknowns, and validation state must remain explicit.
+belong in the pack. Scope hashes are computed only from approved entries after
+directory-membership checks; the worker does not read unrelated workspace files.
+Risks, unknowns, and validation state must remain explicit. Instruction-blacklist
+screening is heuristic rather than comprehensive injection detection. Every pack
+claim is untrusted locator text until the premium parent verifies the exact cited
+source range.
 
 Parallelize only genuinely independent read-only units. Never parallelize ordered
 reasoning or writers against shared mutable state.
 
 ## Non-goals
 
-This workflow does not install or operate a FreeLLMAPI gateway, externalize an
-unapproved private workspace, send sensitive content, switch the parent model,
+This workflow does not install or operate FreeLLMAPI, externalize an unapproved
+private workspace, send sensitive content, switch the parent model,
 recover from OpenAI quota exhaustion, prove billing savings, or let free-model
 reasoning replace premium-parent acceptance.
