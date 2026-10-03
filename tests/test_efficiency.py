@@ -152,6 +152,117 @@ class EfficiencyTests(unittest.TestCase):
         self.assertFalse(result["hooks_checked"])
         self.assertFalse(result["runtime_model_verified"])
 
+    def offload_metrics(self, **overrides):
+        value = {
+            "schema_version": 1,
+            "task_kind": "repo_scout",
+            "estimated_chars": 80_000,
+            "file_count": 24,
+            "diff_lines": 0,
+            "log_bytes": 0,
+            "search_hits": 80,
+            "data_classification": "public",
+            "external_offload_approved": True,
+            "provider_available": True,
+            "independent_units": 4,
+        }
+        value.update(overrides)
+        return value
+
+    def evidence_pack(self):
+        return {
+            "schema_version": 1,
+            "status": "completed",
+            "task_kind": "repo_scout",
+            "snapshot": "example-worktree",
+            "summary": "Relevant routing state is split between session and persistent helpers.",
+            "relevant_files": ["scripts/session_switch.py", "scripts/defaults.py"],
+            "findings": [{
+                "claim": "Session overrides and saved defaults use separate state paths.",
+                "evidence": [{
+                    "path": "scripts/session_switch.py",
+                    "start_line": 80,
+                    "end_line": 130,
+                    "kind": "source",
+                }],
+            }],
+            "risks": ["Live provider behavior is not proven by this offline pack."],
+            "unknowns": [],
+            "validation": [{
+                "check": "offline contract",
+                "status": "not_run",
+                "reference": "example-only",
+            }],
+        }
+
+    def test_large_approved_context_routes_to_free_context_worker(self):
+        result = efficiency.make_offload_plan(
+            self.manifest, self.offload_metrics(), "balanced"
+        )
+        self.assertEqual(result["route"], "free_context_worker")
+        self.assertEqual(result["provider"], "freellmapi")
+        self.assertTrue(result["read_only_worker"])
+        self.assertTrue(result["parallel_read_only_ok"])
+        self.assertFalse(result["quota_fallback"])
+        self.assertEqual(result["network_requests"], 0)
+
+    def test_small_context_stays_native(self):
+        result = efficiency.make_offload_plan(
+            self.manifest,
+            self.offload_metrics(estimated_chars=4_000, file_count=2),
+            "balanced",
+        )
+        self.assertEqual(result["route"], "native")
+        self.assertIn("context_below_offload_threshold", result["reason_codes"])
+
+    def test_sensitive_or_unapproved_context_never_externalizes(self):
+        for overrides, reason in (
+            ({"data_classification": "sensitive"}, "sensitive_data"),
+            ({"external_offload_approved": False}, "workspace_not_opted_in"),
+            ({"provider_available": False}, "provider_not_available"),
+        ):
+            with self.subTest(reason=reason):
+                result = efficiency.make_offload_plan(
+                    self.manifest, self.offload_metrics(**overrides), "economy"
+                )
+                self.assertEqual(result["route"], "native")
+                self.assertIn(reason, result["reason_codes"])
+
+    def test_task_volume_gate_can_trigger_below_primary_threshold(self):
+        result = efficiency.make_offload_plan(
+            self.manifest,
+            self.offload_metrics(estimated_chars=32_000, file_count=20),
+            "balanced",
+        )
+        self.assertEqual(result["route"], "free_context_worker")
+        self.assertIn("task_volume_threshold", result["reason_codes"])
+
+    def test_evidence_pack_contract_is_source_linked_and_bounded(self):
+        pack = self.evidence_pack()
+        efficiency.validate_evidence_pack(pack)
+        raw = json.dumps(pack)
+        self.assertNotIn("raw_content", raw)
+        self.assertNotIn("source_excerpt", raw)
+        bad = copy.deepcopy(pack)
+        bad["relevant_files"] = ["../secret.txt"]
+        with self.assertRaises(ValueError):
+            efficiency.validate_evidence_pack(bad)
+
+    def test_offload_receipt_estimates_avoided_context_not_billing(self):
+        result = efficiency.make_offload_receipt(
+            self.manifest, self.offload_metrics(), self.evidence_pack(), "balanced"
+        )
+        self.assertGreater(result["estimated_premium_context_avoided"], 0)
+        self.assertFalse(result["billing_verified"])
+        self.assertFalse(result["runtime_verified"])
+        self.assertFalse(result["quota_fallback"])
+
+    def test_manifest_keeps_quota_fallback_disabled(self):
+        self.assertEqual(self.manifest["token_offload"]["provider"], "freellmapi")
+        self.assertFalse(self.manifest["token_offload"]["quota_fallback"])
+        self.assertTrue(self.manifest["token_offload"]["workspace_opt_in_required"])
+        self.assertTrue(self.manifest["token_offload"]["sensitive_externalization_forbidden"])
+
     def test_skill_metadata_and_reference_exist(self):
         skill = (ROOT / "skills" / "omnicodex" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(skill.startswith("---\nname: omnicodex\n"))

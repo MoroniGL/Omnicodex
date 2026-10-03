@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "completed",
+  "task_kind": "repo_scout",
+  "snapshot": "example-worktree-fingerprint",
+  "summary": "The session-switch hook owns temporary policy state while defaults.py owns persistent state.",
+  "relevant_files": [
+    "scripts/session_switch.py",
+    "scripts/defaults.py"
+  ],
+  "findings": [
+    {
+      "claim": "Temporary session state is separate from the persistent preference state.",
+      "evidence": [
+        {
+          "path": "scripts/session_switch.py",
+          "start_line": 80,
+          "end_line": 130,
+          "kind": "source"
+        }
+      ]
+    }
+  ],
+  "risks": [
+    "Example line ranges must be regenerated against the actual workspace snapshot."
+  ],
+  "unknowns": [],
+  "validation": [
+    {
+      "check": "offline contract example",
+      "status": "not_run",
+      "reference": "example-only"
+    }
+  ]
+}

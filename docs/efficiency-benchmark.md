@@ -44,3 +44,19 @@ Redact source content, usernames, paths, tokens, and customer data before sharin
 
 Offline policy tests are a prerequisite, not a replacement for live Codex/Claude
 integration tests or these performance measurements.
+
+
+## FreeLLMAPI token-offload condition
+
+Add a separate condition after deterministic narrowing:
+
+6. Read-only FreeLLMAPI context worker returns a validated EvidencePack; the
+   premium parent receives the pack and opens only exact evidence needed for
+   decisions.
+7. Optional graph/index adapters plus the FreeLLMAPI worker, without stacking
+   multiple lossy compressors on the same evidence.
+
+For these conditions, record estimated raw candidate context, EvidencePack size,
+actual worker provider/model when visible, worker usage, root input/cached-input,
+and task acceptance. Estimated premium context avoided is not a billing record
+and must not be translated directly into subscription allowance.

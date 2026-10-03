@@ -38,11 +38,17 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(len(list((codex_home / "agents").glob("*.toml"))), 7)
             self.assertTrue((skills_home / "omnicodex" / "SKILL.md").is_file())
-            reference = skills_home / "omnicodex" / "references" / "efficiency.md"
-            self.assertEqual(reference.read_bytes(),
-                             (ROOT / "skills/omnicodex/references/efficiency.md").read_bytes())
-            self.assertEqual(len(manifest["files"]), 13)
-            self.assertTrue(any(item["destination"] == str(reference.resolve())
+            references = {
+                name: skills_home / "omnicodex" / "references" / name
+                for name in ("routing.md", "efficiency.md", "token-offload.md")
+            }
+            for name, reference in references.items():
+                self.assertEqual(
+                    reference.read_bytes(),
+                    (ROOT / "skills/omnicodex/references" / name).read_bytes(),
+                )
+            self.assertEqual(len(manifest["files"]), 15)
+            self.assertTrue(any(item["destination"] == str(references["token-offload.md"].resolve())
                                 for item in manifest["files"]))
             self.assertEqual(
                 json.loads((codex_home / "omnicodex" / "install-manifest.json").read_text())["result"],

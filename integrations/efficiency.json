@@ -2,30 +2,108 @@
   "schema_version": 1,
   "default_profile": "balanced",
   "profiles": {
-    "economy": {"handoff_target_words": 150},
-    "balanced": {"handoff_target_words": 250},
-    "quality": {"handoff_target_words": 350},
-    "max": {"handoff_target_words": 500},
-    "auto": {"handoff_target_words": 250}
+    "economy": {
+      "handoff_target_words": 150,
+      "offload_min_estimated_tokens": 8000,
+      "offload_target_pack_tokens": 1500,
+      "offload_max_pack_tokens": 3000
+    },
+    "balanced": {
+      "handoff_target_words": 250,
+      "offload_min_estimated_tokens": 12000,
+      "offload_target_pack_tokens": 2200,
+      "offload_max_pack_tokens": 4000
+    },
+    "quality": {
+      "handoff_target_words": 350,
+      "offload_min_estimated_tokens": 16000,
+      "offload_target_pack_tokens": 3000,
+      "offload_max_pack_tokens": 5500
+    },
+    "max": {
+      "handoff_target_words": 500,
+      "offload_min_estimated_tokens": 20000,
+      "offload_target_pack_tokens": 4000,
+      "offload_max_pack_tokens": 7000
+    },
+    "auto": {
+      "handoff_target_words": 250,
+      "offload_min_estimated_tokens": 12000,
+      "offload_target_pack_tokens": 2200,
+      "offload_max_pack_tokens": 4000
+    }
   },
   "providers": {
     "context-mode": {
       "binary_hint": "context-mode",
-      "required_tools": ["ctx_index", "ctx_search", "ctx_execute", "ctx_stats"],
+      "required_tools": [
+        "ctx_index",
+        "ctx_search",
+        "ctx_execute",
+        "ctx_stats"
+      ],
       "upstream": "https://github.com/mksglu/context-mode"
     },
     "codebase-memory-mcp": {
       "binary_hint": "codebase-memory-mcp",
-      "required_tools": ["index_status", "get_graph_schema", "search_graph", "get_code_snippet"],
+      "required_tools": [
+        "index_status",
+        "get_graph_schema",
+        "search_graph",
+        "get_code_snippet"
+      ],
       "upstream": "https://github.com/DeusData/codebase-memory-mcp"
     }
   },
-  "deferred": ["rtk-rewrite", "desktop-commander-per-role-permissions", "persistent-memory-store"],
+  "deferred": [
+    "rtk-rewrite",
+    "desktop-commander-per-role-permissions",
+    "persistent-memory-store"
+  ],
   "policy": {
     "explicit_opt_in": true,
     "one_output_compressor": true,
     "native_fallback": true,
     "raw_evidence_required": true,
+    "automatic_installation": false
+  },
+  "token_offload": {
+    "provider": "freellmapi",
+    "model_selector": "auto",
+    "read_only_default": true,
+    "chars_per_token": 4,
+    "supported_tasks": {
+      "repo_scout": {
+        "secondary_metric": "file_count",
+        "secondary_min": 12,
+        "min_token_fraction": 0.5
+      },
+      "bulk_file_read": {
+        "secondary_metric": "file_count",
+        "secondary_min": 8,
+        "min_token_fraction": 0.5
+      },
+      "log_distill": {
+        "secondary_metric": "log_bytes",
+        "secondary_min": 65536,
+        "min_token_fraction": 0.5
+      },
+      "diff_analysis": {
+        "secondary_metric": "diff_lines",
+        "secondary_min": 1000,
+        "min_token_fraction": 0.5
+      },
+      "long_doc_digest": {
+        "secondary_metric": "estimated_chars",
+        "secondary_min": 50000,
+        "min_token_fraction": 0.5
+      }
+    },
+    "workspace_opt_in_required": true,
+    "sensitive_externalization_forbidden": true,
+    "root_acceptance_required": true,
+    "raw_evidence_retrieval_required": true,
+    "quota_fallback": false,
     "automatic_installation": false
   }
 }
