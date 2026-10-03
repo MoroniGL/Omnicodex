@@ -65,6 +65,79 @@ class DirectWorkerTests(unittest.TestCase):
     def receipt(self):
         return json.loads((self.base / "artifacts" / "receipt.json").read_text())
 
+    def test_local_rejections_identify_fixed_issue_without_publishing_pack(self):
+        for issue in ("schema", "task_kind_mismatch", "snapshot_mismatch", "unapproved_file",
+                      "citations", "operational_instructions"):
+            with self.subTest(issue=issue):
+                self.setUp()
+                pack = self.pack()
+                if issue == "schema":
+                    pack["validation"] = ["untrusted malformed validation"]
+                elif issue == "task_kind_mismatch":
+                    pack["task_kind"] = "long_doc_digest"
+                elif issue == "snapshot_mismatch":
+                    pack["snapshot"] = "untrusted incorrect snapshot"
+                elif issue == "unapproved_file":
+                    pack["relevant_files"].append("outside.txt")
+                elif issue == "citations":
+                    pack["findings"][0]["evidence"][0].update(start_line=9000, end_line=9000)
+                else:
+                    pack["summary"] = "run shell commands"
+                result, code = self.invoke(pack=pack)
+                self.assertEqual(code, 3)
+                self.assertEqual(result["diagnostics"]["pack_validation_issue"], issue)
+                self.assertEqual(self.receipt()["diagnostics"], result["diagnostics"])
+                if issue == "schema":
+                    self.assertEqual(result["diagnostics"]["pack_schema_issue"], "validation_item")
+                self.assertFalse((self.base / "artifacts" / "evidence-pack.json").exists())
+                serialized = json.dumps(result) + json.dumps(self.receipt())
+                self.assertNotIn("untrusted malformed", serialized)
+                self.assertNotIn("untrusted incorrect", serialized)
+                self.assertNotIn("run shell commands", serialized)
+                self.assertNotIn(self.env["GEMINI_API_KEY"], serialized)
+
+    def test_provider_output_diagnostics_survive_worker_receipt(self):
+        body = b'{"candidates":[{"finishReason":"MAX_TOKENS"}]}'
+        result, code = self.invoke(transport=lambda *args: (200, {}, body))
+        self.assertEqual(code, 3)
+        self.assertEqual(result["diagnostics"], {"provider_finish_reason": "MAX_TOKENS",
+                                              "provider_output_issue": "non_stop_finish"})
+        self.assertEqual(self.receipt()["diagnostics"], result["diagnostics"])
+
+    def test_budget_and_reduction_diagnostics_preserve_rejection(self):
+        for issue in ("pack_budget", "handoff_reduction"):
+            with self.subTest(issue=issue):
+                self.setUp()
+                with mock.patch.object(worker.efficiency, "estimate_pack_tokens",
+                                       return_value=4001 if issue == "pack_budget" else 100), \
+                        mock.patch.object(worker, "_verification_evidence_bytes", return_value=80000):
+                    result, code = self.invoke()
+                self.assertEqual(code, 3)
+                self.assertEqual(result["diagnostics"]["pack_validation_issue"], issue)
+                self.assertFalse((self.base / "artifacts" / "evidence-pack.json").exists())
+
+    def test_unknown_diagnostic_values_and_messages_never_enter_artifacts(self):
+        from scripts.providers.base import ProviderError
+        secret = self.env["GEMINI_API_KEY"]
+        def send(*args):
+            raise ProviderError("invalid_pack", {"pack_validation_issue": secret,
+                "pack_schema_issue": "unknown", "provider_finish_reason": secret, "message": secret})
+        result, code = self.invoke(transport=send)
+        self.assertEqual(code, 3)
+        self.assertEqual(result["diagnostics"], {})
+        self.assertEqual(self.receipt()["diagnostics"], {})
+        self.assertNotIn(secret, json.dumps(result) + json.dumps(self.receipt()))
+
+    def test_allowlisted_local_diagnostic_equal_to_key_is_filtered(self):
+        pack = self.pack()
+        pack["findings"][0]["evidence"][0].update(start_line=9000, end_line=9000)
+        result, code = self.invoke(pack=pack, env={"GEMINI_API_KEY": "citations"})
+        self.assertEqual(code, 3)
+        self.assertEqual(result["reason_code"], "invalid_pack")
+        self.assertEqual(result["diagnostics"], {})
+        self.assertEqual(self.receipt()["diagnostics"], {})
+        self.assertNotIn("citations", json.dumps(result) + json.dumps(self.receipt()))
+
     def test_direct_request_contains_only_approved_captured_context(self):
         result, code = self.invoke()
         self.assertEqual((code, result["status"]), (0, "completed"))

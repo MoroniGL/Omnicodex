@@ -136,6 +136,13 @@ Tool parts, malformed metadata, truncated output, and invalid packs still fail.
 Array bounds are omitted from the API schema to avoid the observed HTTP 400;
 the canonical local validator continues enforcing every array limit.
 
+The real-task worker also emits `diagnostics` in its failure result and receipt.
+Fixed `pack_validation_issue` codes distinguish schema, task/snapshot identity,
+approved-path/citation, operational-instruction, budget, and handoff-reduction
+rejections. Recognized `pack_schema_issue` codes identify the failed schema rule.
+Provider parsing/HTTP codes are retained when available. Rejected packs and raw
+exception messages are never written to disk or included in diagnostics.
+
 For HTTP request errors, `provider_error_hints` contains only fixed labels for
 terms in the provider message, such as `schema_enum`, `schema_complexity`,
 `json_schema`, or `api_key`. These are lexical hints, not a verified diagnosis.

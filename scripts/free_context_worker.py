@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts import efficiency, offload_scope as scope
-from scripts.providers.gemini import GeminiProvider
-from scripts.providers.base import ProviderError
+from scripts.providers.gemini import GeminiProvider, _contains_secret
+from scripts.providers.base import ProviderError, safe_diagnostics
 
 MANIFEST = ROOT / "integrations" / "efficiency.json"
 OUTPUT_SCHEMA = ROOT / "schemas" / "evidence-pack.schema.json"
@@ -29,6 +29,20 @@ MAX_ARTIFACT_BYTES = 524_288
 MAX_TIMEOUT_SECONDS = 300.0
 # Require at least 20% reduction, including exact ranges the premium parent reopens.
 MAX_HANDOFF_FRACTION = 0.8
+
+_SCHEMA_ISSUES = dict(zip((
+    "Unsupported EvidencePack schema", "Invalid EvidencePack status", "Invalid EvidencePack task",
+    "Invalid EvidencePack snapshot", "Invalid EvidencePack summary", "Unknown EvidencePack field",
+    "Invalid EvidencePack file list", "Invalid EvidencePack findings", "Completed EvidencePack needs findings",
+    "Invalid EvidencePack finding", "Invalid EvidencePack evidence", "Invalid EvidencePack evidence shape",
+    "Invalid EvidencePack evidence reference", "EvidencePack citation missing from relevant files",
+    "Invalid EvidencePack line range", "Invalid EvidencePack risk/unknown list",
+    "Invalid EvidencePack validation", "Invalid EvidencePack validation item",
+), (
+    "version", "status", "task", "snapshot", "summary", "unknown_field", "file_list", "findings",
+    "empty_findings", "finding", "evidence", "evidence_shape", "evidence_reference",
+    "missing_relevant_citation", "line_range", "risk_unknown_list", "validation", "validation_item",
+)))
 
 
 def _load_local(name: str) -> Any:
@@ -159,14 +173,26 @@ def _verification_evidence_bytes(pack: dict[str, Any], captured: Any) -> int:
 
 def _validate_pack(pack: dict[str, Any], request: dict[str, Any], captured: Any,
                    plan: dict[str, Any], manifest: dict[str, Any]) -> tuple[int, int]:
-    efficiency.validate_evidence_pack(pack)
-    if pack["task_kind"] != request["task_kind"] or pack["snapshot"] != captured.fingerprint:
-        raise ValueError("EvidencePack identity mismatch")
+    try:
+        efficiency.validate_evidence_pack(pack)
+    except ValueError as error:
+        diagnostics = {"pack_validation_issue": "schema"}
+        issue = _SCHEMA_ISSUES.get(str(error))
+        if issue:
+            diagnostics["pack_schema_issue"] = issue
+        raise ProviderError("invalid_pack", diagnostics) from None
+    if pack["task_kind"] != request["task_kind"]:
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "task_kind_mismatch"})
+    if pack["snapshot"] != captured.fingerprint:
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "snapshot_mismatch"})
     approved = {entry.path for entry in captured.entries}
     if not set(pack["relevant_files"]).issubset(approved):
-        raise ValueError("EvidencePack references files outside the captured scope")
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "unapproved_file"})
     references = [item for finding in pack["findings"] for item in finding["evidence"]]
-    scope.validate_captured_references(captured, references)
+    try:
+        scope.validate_captured_references(captured, references)
+    except ValueError:
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "citations"}) from None
     # Reject common instruction injection. All remaining prose is still untrusted;
     # parent acceptance requires opening exact source ranges, never executing prose.
     instruction = re.compile(
@@ -174,15 +200,15 @@ def _validate_pack(pack: dict[str, Any], request: dict[str, Any], captured: Any,
         r"run (?:shell|powershell|bash|cmd|commands)|execute (?:commands|code)|"
         r"delete (?:files|the workspace)|system prompt)\b", re.IGNORECASE)
     if instruction.search(json.dumps(pack, ensure_ascii=False)):
-        raise ValueError("EvidencePack contains operational instructions")
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "operational_instructions"})
     pack_tokens = efficiency.estimate_pack_tokens(manifest, pack)
     if pack_tokens > plan["max_pack_tokens"]:
-        raise ValueError("EvidencePack exceeds the profile budget")
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "pack_budget"})
     divisor = manifest["token_offload"]["chars_per_token"]
     evidence_bytes = _verification_evidence_bytes(pack, captured)
     evidence_tokens = (evidence_bytes + divisor - 1) // divisor
     if pack_tokens + evidence_tokens > int(plan["estimated_raw_tokens"] * MAX_HANDOFF_FRACTION):
-        raise ValueError("Compact handoff would not meaningfully reduce premium context")
+        raise ProviderError("invalid_pack", {"pack_validation_issue": "handoff_reduction"})
     return pack_tokens, evidence_tokens
 
 
@@ -204,7 +230,8 @@ def _scope_unchanged(workspace: Path, captured: Any,
 def _receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str,
              captured: Any, telemetry: dict[str, Any], reason: str,
              snapshot_after: str | None, pack: dict[str, Any] | None = None,
-             pack_tokens: int | None = None, evidence_tokens: int | None = None) -> dict[str, Any]:
+             pack_tokens: int | None = None, evidence_tokens: int | None = None,
+             secret: str | None = None) -> dict[str, Any]:
     compact = pack_tokens + evidence_tokens if pack_tokens is not None and evidence_tokens is not None else None
     avoided = plan["estimated_raw_tokens"] - compact if compact is not None else None
     receipt = {
@@ -236,6 +263,9 @@ def _receipt(metrics: dict[str, Any], plan: dict[str, Any], profile: str,
         receipt[field] = telemetry.get(field)
     receipt["served_provider"] = None
     receipt["fallback_count"] = 0  # This implementation never retries another route/provider.
+    if reason:
+        receipt["diagnostics"] = {field: value for field, value in safe_diagnostics(telemetry).items()
+                                  if not secret or not _contains_secret(value, secret)}
     return receipt
 
 
@@ -315,12 +345,14 @@ def run_action(action: str, workspace: Path | None, request_path: Path | None,
         reason = "workspace_mutated"
     receipt = _receipt(metrics, plan, profile, captured, telemetry, reason, snapshot_after,
                        pack if not reason else None,
-                       pack_tokens if not reason else None, evidence_tokens if not reason else None)
+                       pack_tokens if not reason else None, evidence_tokens if not reason else None,
+                       secret=env.get("GEMINI_API_KEY"))
     receipt["orchestration_elapsed_ms"] = int((time.monotonic() - started) * 1000)
     if reason:
         _write_json_new(artifact_dir / "receipt.json", receipt)
         return ({"schema_version": 1, "status": "failed", "route": "native", "reason_code": reason,
                  "native_fallback_recommended": True, "quota_fallback": False,
+                 "diagnostics": receipt["diagnostics"],
                  "artifacts": {"directory": str(artifact_dir), "receipt": "receipt.json"}}, 3)
     _write_json_new(artifact_dir / "evidence-pack.json", pack)
     _write_json_new(artifact_dir / "receipt.json", receipt)

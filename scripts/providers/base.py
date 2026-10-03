@@ -21,6 +21,12 @@ _DIAGNOSTIC_CODES = {
     "provider_output_issue": frozenset(("invalid_response_json", "invalid_usage",
         "invalid_candidates", "non_stop_finish", "invalid_content_parts",
         "invalid_pack_json", "non_object_pack")),
+    "pack_validation_issue": frozenset(("schema", "task_kind_mismatch", "snapshot_mismatch",
+        "unapproved_file", "citations", "operational_instructions", "pack_budget", "handoff_reduction")),
+    "pack_schema_issue": frozenset(("version", "status", "task", "snapshot", "summary", "unknown_field",
+        "file_list", "findings", "empty_findings", "finding", "evidence", "evidence_shape",
+        "evidence_reference", "missing_relevant_citation", "line_range", "risk_unknown_list",
+        "validation", "validation_item")),
 }
 
 _REQUEST_HINT_TERMS = {
