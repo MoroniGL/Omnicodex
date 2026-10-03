@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -577,17 +578,20 @@ class CodexExecAdapterTests(unittest.TestCase):
             "import json, os, pathlib, sys, time\n"
             "args = sys.argv[1:]\n"
             "mode = os.environ.get('FAKE_CODEX_MODE', 'success')\n"
+            "if mode == 'no_read': time.sleep(5); sys.exit(0)\n"
             "prompt = sys.stdin.read()\n"
             "if mode == 'timeout': time.sleep(5)\n"
             "if mode == 'malformed': print('{not json}')\n"
+            "elif mode == 'leak_stdout': print(os.environ['FREELLMAPI_API_KEY'])\n"
             "else: print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 12, 'cached_input_tokens': 3, 'output_tokens': 4, 'reasoning_output_tokens': 2}, 'model': 'served-model', 'provider': 'served-provider', 'retry_count': 1, 'fallback_count': 0}))\n"
             "if mode == 'nonzero': sys.exit(7)\n"
-            "if mode != 'missing': pathlib.Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps({'status': 'completed', 'summary': 'ok', 'prompt_has_staged_content': 'staged-secret-content' in prompt}), encoding='utf-8')\n",
+            "if mode != 'missing': pathlib.Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps({'status': 'completed', 'summary': os.environ['FREELLMAPI_API_KEY'] if mode == 'leak_final' else 'ok', 'prompt_has_staged_content': 'staged-secret-content' in prompt}), encoding='utf-8')\n",
             encoding="utf-8",
         )
         return (sys.executable, str(fake))
 
-    def execute_fake(self, mode):
+    def execute_fake(self, mode, *, prompt="Read the staged workspace and return the schema result.",
+                     timeout_seconds=0.2, max_final_message_bytes=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             staged = root / "stage"
@@ -598,9 +602,11 @@ class CodexExecAdapterTests(unittest.TestCase):
                 self.fake_prefix(directory), staged, ROOT / "schemas" / "evidence-pack.schema.json", output
             )
             env = dict(os.environ, FAKE_CODEX_MODE=mode, FREELLMAPI_API_KEY="secret-value")
+            options = {} if max_final_message_bytes is None else {
+                "max_final_message_bytes": max_final_message_bytes
+            }
             return self.adapter().execute_codex_exec(
-                argv, "Read the staged workspace and return the schema result.", timeout_seconds=0.2,
-                environment=env,
+                argv, prompt, timeout_seconds=timeout_seconds, environment=env, **options
             )
 
     def test_execute_real_subprocess_returns_sanitized_success_without_prompt_file_contents(self):
@@ -626,6 +632,39 @@ class CodexExecAdapterTests(unittest.TestCase):
                 self.assertNotIn("stdout", result)
                 self.assertNotIn("stderr", result)
 
+    def test_execute_deadline_covers_nonreading_stdin_and_rejects_nonfinite_timeouts(self):
+        started = time.monotonic()
+        result = self.execute_fake("no_read", prompt="x" * self.adapter().MAX_PROMPT_BYTES,
+                                   timeout_seconds=0.1)
+        self.assertEqual(result["outcome"], "timeout")
+        self.assertLess(time.monotonic() - started, 1)
+        for timeout in (0, -1, float("inf"), float("nan"), 301):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                self.execute_fake("success", timeout_seconds=timeout)
+
+    def test_execute_rejects_prompt_and_worker_outputs_that_contain_the_provider_key(self):
+        self.assertEqual(self.execute_fake("success", prompt="secret-value")["outcome"],
+                         "credential_leak")
+        for mode in ("leak_stdout", "leak_final"):
+            with self.subTest(mode=mode):
+                result = self.execute_fake(mode)
+                self.assertEqual(result["outcome"], "credential_leak")
+                self.assertNotIn("secret-value", json.dumps(result))
+
+    def test_execute_rejects_stale_and_oversize_final_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "result.json"
+            output.write_text('{"stale": true}', encoding="utf-8")
+            argv = self.adapter().build_codex_exec_argv(
+                self.fake_prefix(directory), root, ROOT / "schemas" / "evidence-pack.schema.json", output
+            )
+            result = self.adapter().execute_codex_exec(argv, "safe", timeout_seconds=0.2,
+                                                       environment=dict(os.environ, FREELLMAPI_API_KEY="secret-value"))
+            self.assertEqual(result["outcome"], "stale_output")
+        self.assertEqual(self.execute_fake("success", max_final_message_bytes=8)["outcome"],
+                         "missing_output")
+
     def test_telemetry_extracts_only_designated_runtime_usage_and_fails_closed_on_bad_json(self):
         raw = "\n".join((
             json.dumps({"type": "message", "usage": {"input_tokens": 999}}),
@@ -634,11 +673,16 @@ class CodexExecAdapterTests(unittest.TestCase):
         telemetry = self.telemetry().parse_jsonl_usage(raw.encode("utf-8"))
         self.assertEqual(telemetry, {
             "input_tokens": 12, "cached_input_tokens": 3, "output_tokens": 4,
-            "reasoning_output_tokens": 2, "served_model": "served-model",
-            "served_provider": "served-provider", "retry_count": 1, "fallback_count": 0,
+            "reasoning_output_tokens": 2, "served_model": None,
+            "served_provider": None, "retry_count": None, "fallback_count": None,
         })
         with self.assertRaises(ValueError):
             self.telemetry().parse_jsonl_usage(b'{not json}\n')
+
+    def test_telemetry_rejects_oversized_unterminated_line_before_json_materialization(self):
+        oversized = b"x" * (self.telemetry().MAX_TELEMETRY_LINE_BYTES + 1)
+        with self.assertRaises(ValueError):
+            self.telemetry().parse_jsonl_usage(oversized)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,9 @@ from typing import Any, BinaryIO
 MAX_TELEMETRY_BYTES = 524_288
 MAX_TELEMETRY_LINES = 4_096
 MAX_TELEMETRY_LINE_BYTES = 65_536
-_RUNTIME_EVENT_TYPES = frozenset({"turn.completed", "response.completed", "session.completed"})
+# Only this Codex JSONL completion event is locally evidenced.  Do not infer
+# served model/provider/retry metadata from fields that lack runtime evidence.
+_RUNTIME_EVENT_TYPES = frozenset({"turn.completed"})
 _USAGE_FIELDS = {
     "input_tokens": ("input_tokens", "prompt_tokens"),
     "cached_input_tokens": ("cached_input_tokens",),
@@ -46,7 +48,13 @@ def parse_jsonl_usage(source: bytes | BinaryIO) -> dict[str, Any]:
         "fallback_count": None,
     }
     total = 0
-    for count, raw_line in enumerate(_line_stream(source), start=1):
+    stream = _line_stream(source)
+    count = 0
+    while True:
+        raw_line = stream.readline(MAX_TELEMETRY_LINE_BYTES + 1)
+        if not raw_line:
+            break
+        count += 1
         if count > MAX_TELEMETRY_LINES:
             raise ValueError("Telemetry line limit exceeded")
         total += len(raw_line)
@@ -67,12 +75,4 @@ def parse_jsonl_usage(source: bytes | BinaryIO) -> dict[str, Any]:
                 if value is not None:
                     result[target] = value
                     break
-        for target, source_name in (("served_model", "model"), ("served_provider", "provider")):
-            value = event.get(source_name)
-            if isinstance(value, str) and value:
-                result[target] = value
-        for target, source_name in (("retry_count", "retry_count"), ("fallback_count", "fallback_count")):
-            value = _nonnegative_integer(event.get(source_name))
-            if value is not None:
-                result[target] = value
     return result

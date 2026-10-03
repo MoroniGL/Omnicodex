@@ -1,9 +1,11 @@
 """Construct and run one bounded, isolated Codex exec worker."""
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shlex
+import stat
 import subprocess
 import threading
 import time
@@ -14,6 +16,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:3001/v1"
 MAX_PROMPT_BYTES = 16_384
 MAX_CAPTURE_BYTES = 524_288
 MAX_FINAL_MESSAGE_BYTES = 262_144
+MAX_TIMEOUT_SECONDS = 300
+_SECRET_ENV_KEY = "FREELLMAPI_API_KEY"
 
 
 def _scope_module():
@@ -71,9 +75,14 @@ def format_command(argv: Sequence[str], *, platform: str) -> str:
     raise ValueError("Unknown command display platform")
 
 
-def _capture(stream, limit: int, captured: list[bytes], exceeded: list[bool]) -> None:
+def _capture(stream, limit: int, captured: list[bytes], exceeded: list[bool], secret: bytes,
+             leaked: list[bool]) -> None:
     size = 0
+    tail = b""
     while chunk := stream.read(65_536):
+        if secret and secret in tail + chunk:
+            leaked[0] = True
+        tail = (tail + chunk)[-(max(0, len(secret) - 1)):]
         if size < limit:
             captured.append(chunk[:limit - size])
         size += len(chunk)
@@ -86,14 +95,39 @@ def _result(outcome: str, exit_code: int | None, started: float, **extra: Any) -
             "elapsed_ms": int((time.monotonic() - started) * 1000), **extra}
 
 
+def _close_stream(stream) -> None:
+    try:
+        if stream is not None:
+            stream.close()
+    except OSError:
+        pass
+
+
+def _read_final_output(path: Path, limit: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError("Final output is unavailable or exceeds its limit")
+        raw = os.read(descriptor, limit + 1)
+        if len(raw) > limit:
+            raise ValueError("Final output exceeds its limit")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
 def execute_codex_exec(argv: Sequence[str], prompt: str, *, timeout_seconds: float,
                        environment: Mapping[str, str] | None = None,
                        max_capture_bytes: int = MAX_CAPTURE_BYTES,
                        max_final_message_bytes: int = MAX_FINAL_MESSAGE_BYTES) -> dict[str, Any]:
     """Run one worker with shell disabled and return a compact, secret-free result."""
+    started = time.monotonic()
     if not isinstance(prompt, str) or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise ValueError("Prompt exceeds the bounded worker limit")
-    if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0 or \
+    if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or \
+            not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= MAX_TIMEOUT_SECONDS or \
             max_capture_bytes <= 0 or max_final_message_bytes <= 0:
         raise ValueError("Invalid execution bound")
     values = list(argv)
@@ -103,42 +137,69 @@ def execute_codex_exec(argv: Sequence[str], prompt: str, *, timeout_seconds: flo
         output_path = Path(values[values.index("--output-last-message") + 1])
     except (ValueError, IndexError) as error:
         raise ValueError("Codex argv has no final message path") from error
-    started = time.monotonic()
+    execution_environment = dict(environment) if environment is not None else dict(os.environ)
+    key_value = execution_environment.get(_SECRET_ENV_KEY)
+    secret = key_value.encode("utf-8") if isinstance(key_value, str) and key_value else b""
+    if secret and secret in prompt.encode("utf-8"):
+        return _result("credential_leak", None, started)
+    try:
+        os.lstat(output_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return _result("stale_output", None, started)
+    else:
+        return _result("stale_output", None, started)
+    deadline = started + float(timeout_seconds)
     try:
         process = subprocess.Popen(values, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   shell=False, env=dict(environment) if environment is not None else None)
+                                   shell=False, env=execution_environment)
     except OSError:
         return _result("start_failed", None, started)
-    stdout, stderr, stdout_exceeded, stderr_exceeded = [], [], [False], [False]
+    stdout, stderr, stdout_exceeded, stderr_exceeded, leaked = [], [], [False], [False], [False]
     readers = [
-        threading.Thread(target=_capture, args=(process.stdout, max_capture_bytes, stdout, stdout_exceeded)),
-        threading.Thread(target=_capture, args=(process.stderr, max_capture_bytes, stderr, stderr_exceeded)),
+        threading.Thread(target=_capture, args=(process.stdout, max_capture_bytes, stdout, stdout_exceeded,
+                                                secret, leaked), daemon=True),
+        threading.Thread(target=_capture, args=(process.stderr, max_capture_bytes, stderr, stderr_exceeded,
+                                                secret, leaked), daemon=True),
     ]
     for reader in readers:
         reader.start()
+    def deliver_prompt() -> None:
+        try:
+            process.stdin.write(prompt.encode("utf-8"))
+        except OSError:
+            pass
+        finally:
+            _close_stream(process.stdin)
+
+    writer = threading.Thread(target=deliver_prompt, daemon=True)
+    writer.start()
+    timed_out = False
     try:
-        process.stdin.write(prompt.encode("utf-8"))
-        process.stdin.close()
-        process.wait(timeout=timeout_seconds)
+        process.wait(timeout=max(0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
+        timed_out = True
+    if timed_out:
         process.terminate()
         try:
-            process.wait(timeout=1)
+            process.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait()
-        for reader in readers:
-            reader.join()
-        process.stdout.close()
-        process.stderr.close()
+        _close_stream(process.stdin)
+        _close_stream(process.stdout)
+        _close_stream(process.stderr)
         return _result("timeout", None, started)
-    finally:
-        if process.stdin and not process.stdin.closed:
-            process.stdin.close()
-    for reader in readers:
-        reader.join()
-    process.stdout.close()
-    process.stderr.close()
+    for thread in [writer, *readers]:
+        thread.join(max(0, deadline - time.monotonic()))
+    alive = any(thread.is_alive() for thread in [writer, *readers])
+    _close_stream(process.stdin)
+    _close_stream(process.stdout)
+    _close_stream(process.stderr)
+    if alive:
+        return _result("timeout", None, started)
+    if leaked[0]:
+        return _result("credential_leak", process.returncode, started)
     if stdout_exceeded[0] or stderr_exceeded[0]:
         return _result("output_limit_exceeded", process.returncode, started)
     if process.returncode != 0:
@@ -156,9 +217,10 @@ def execute_codex_exec(argv: Sequence[str], prompt: str, *, timeout_seconds: flo
     except (ValueError, UnicodeError):
         return _result("malformed_output", process.returncode, started)
     try:
-        if not output_path.is_file() or output_path.stat().st_size > max_final_message_bytes:
-            return _result("missing_output", process.returncode, started)
-        final_message = json.loads(output_path.read_bytes().decode("utf-8"))
+        final_bytes = _read_final_output(output_path, max_final_message_bytes)
+        if secret and secret in final_bytes:
+            return _result("credential_leak", process.returncode, started)
+        final_message = json.loads(final_bytes.decode("utf-8"))
         if not isinstance(final_message, dict):
             raise ValueError("Final message must be an object")
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
