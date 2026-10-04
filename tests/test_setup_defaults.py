@@ -22,7 +22,8 @@ class SetupDefaultsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name).resolve()
         self.repo, self.home, self.skills = root / "repo", root / "home", root / "skills"
-        for p in (self.repo / "profiles", self.repo / "agents", self.repo / "skills/omnicodex/references", self.home):
+        for p in (self.repo / "profiles", self.repo / "agents", self.repo / "scripts",
+                  self.repo / "skills/omnicodex/references", self.home):
             p.mkdir(parents=True)
         for name in d.PROFILES[1:]:
             (self.repo / f"profiles/{name}.config.toml").write_text(

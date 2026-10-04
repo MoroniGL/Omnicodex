@@ -89,8 +89,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except (defaults.DefaultsError, installer.InstallConflict, session_setup.SessionSetupError,
             OSError, ValueError, TypeError, KeyError) as exc:
-        print(json.dumps({"error": str(exc) if isinstance(exc, defaults.DefaultsError) else "setup_failed",
-                          "runtime_verified": False, "note": "Review the local setup; do not retry blindly."}), file=sys.stderr)
+        safe_error = str(exc) if isinstance(
+            exc, (defaults.DefaultsError, session_setup.SessionSetupError)
+        ) else "setup_failed"
+        print(json.dumps({"error": safe_error, "runtime_verified": False,
+                          "note": "Review the local setup; do not retry blindly."}), file=sys.stderr)
         return 2
 
 
