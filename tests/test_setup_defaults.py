@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import defaults as d
+from scripts import session_setup
 from scripts import setup as setup_module
 
 
@@ -31,6 +32,9 @@ class SetupDefaultsTests(unittest.TestCase):
         (self.repo / "skills/omnicodex/SKILL.md").write_text('---\nname: omnicodex\n---\nPolicy\n')
         for name in ("routing", "efficiency", "token-offload"):
             (self.repo / f"skills/omnicodex/references/{name}.md").write_text("Optional reference\n")
+        (self.repo / "scripts/session_switch.py").write_text(
+            "#!/usr/bin/env python3\nprint('session fixture')\n", encoding="utf-8"
+        )
         for relative in (
             "scripts/__init__.py",
             "scripts/efficiency.py",
@@ -60,7 +64,10 @@ class SetupDefaultsTests(unittest.TestCase):
         self.assertEqual(result["assets"], 27)
         self.assertEqual(result["offload_status"]["native_status"], "READY")
         self.assertEqual(result["offload_status"]["free_context_offload"], "NOT CONFIGURED")
+        self.assertTrue(result["session_switch"]["hook_trust_required"])
+        self.assertEqual(len(result["session_switch"]["would_change"]), 2)
         self.assertFalse((self.home / "omnicodex").exists())
+        self.assertFalse((self.home / "hooks.json").exists())
         self.assertFalse(self.skills.exists())
 
     def test_fresh_setup_activates_auto_after_assets(self):
@@ -79,6 +86,11 @@ class SetupDefaultsTests(unittest.TestCase):
             (self.home / "omnicodex/scripts/providers/gemini.py").read_text(),
             "fixture scripts/providers/gemini.py\n",
         )
+        self.assertTrue((self.home / "omnicodex/session_switch.py").is_file())
+        hooks = json.loads((self.home / "hooks.json").read_text())
+        handler = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual(handler["statusMessage"], session_setup.STATUS_MESSAGE)
+        self.assertTrue(result["session_switch"]["hook_trust_required"])
 
     def test_setup_update_preserves_selection(self):
         self.run_setup(apply=True, profile="quality")
@@ -116,6 +128,42 @@ class SetupDefaultsTests(unittest.TestCase):
         self.assertEqual(report["asset_phase"], "installed")
         self.assertEqual(report["preferences_phase"], "failed")
         self.assertFalse(d.state_path(self.home).exists())
+
+    def test_hook_conflict_fails_before_any_install_write(self):
+        bad = {
+            "hooks": {
+                "UserPromptSubmit": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "python old.py hook",
+                        "statusMessage": session_setup.STATUS_MESSAGE,
+                    }]
+                }]
+            }
+        }
+        (self.home / "hooks.json").write_text(json.dumps(bad), encoding="utf-8")
+        with self.assertRaisesRegex(
+            session_setup.SessionSetupError,
+            "existing_omnicodex_hook_differs_review_required",
+        ):
+            self.run_setup(apply=True)
+        self.assertFalse(self.skills.exists())
+        self.assertFalse(d.state_path(self.home).exists())
+
+    def test_session_hook_failure_reports_partial_activation(self):
+        output = io.StringIO()
+        with patch.object(
+            session_setup,
+            "apply_plan",
+            side_effect=session_setup.SessionSetupError("synthetic_hook_failure"),
+        ), contextlib.redirect_stderr(output):
+            with self.assertRaises(session_setup.SessionSetupError):
+                self.run_setup(apply=True)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["asset_phase"], "installed")
+        self.assertEqual(report["preferences_phase"], "configured")
+        self.assertEqual(report["session_switch_phase"], "failed")
+        self.assertTrue(d.state_path(self.home).exists())
 
     def test_profile_reads_real_source_values_not_hardcoded_models(self):
         (self.repo / "profiles/balanced.config.toml").write_text(
