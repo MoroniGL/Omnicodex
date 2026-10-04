@@ -6,11 +6,11 @@
 - [x] Define initial agent roles.
 - [x] Define Economy, Balanced, Quality, Max and Auto profiles.
 - [x] Separate control plane from execution plane.
-- [ ] Validate current Codex plugin/custom-agent schema.
-- [ ] Implement installable agent definitions.
-- [ ] Add routing skill and profile selection.
-- [ ] Add installer and uninstall path.
-- [ ] Add configuration validation.
+- [x] Validate current Codex plugin/custom-agent schema.
+- [x] Implement installable agent definitions.
+- [x] Add routing skill and profile selection.
+- [x] Add installer and rollback-oriented update path.
+- [x] Add configuration validation.
 - [ ] Add example project integration.
 
 ## Context & Token Efficiency — first increment
@@ -63,4 +63,4 @@ OmniCodex will not silently depend on undocumented model-switching behavior.
 - [ ] Tune thresholds from representative Windows benchmarks.
 - [ ] Evaluate GPT-6.1 Sol / GPT-6 Luna profile migrations separately from the offload worker.
 - [ ] Package the stable OmniCodex stack as a Codex/ChatGPT plugin with trusted lifecycle hooks.
-- [ ] Complete controlled Gemini Direct acceptance on Windows and publish measured rows without billing claims.
+- [x] Complete controlled Gemini Direct acceptance on Windows and publish measured rows without billing claims.

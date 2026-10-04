@@ -62,21 +62,19 @@ model is told that Max recommends Astra High. Use /model to select Astra/High
 inside the same conversation. Do not start a new chat merely to change the
 parent.
 
-## Install the experimental hook
+## Install the session-control hook
 
-Preview:
-
-~~~powershell
-python .\scripts\session_setup.py
-~~~
-
-Apply:
+The recommended full setup now includes this hook automatically:
 
 ~~~powershell
-python .\scripts\session_setup.py --apply
+python .\scripts\setup.py
+python .\scripts\setup.py --apply
 ~~~
 
-The installer writes only:
+For hook-only repair or inspection, `scripts/session_setup.py` remains available
+with the same preview-first `--apply` behavior.
+
+The hook phase writes only:
 
 - CODEX_HOME/omnicodex/session_switch.py
 - CODEX_HOME/hooks.json, merged with unrelated existing hooks
@@ -114,32 +112,24 @@ to the already loaded saved policy and emits a short warning without echoing
 prompt or configuration contents. It never changes approvals, sandbox settings,
 permissions, providers, or worker definitions.
 
-## Windows acceptance plan
+## Windows acceptance
 
-Target environment: Codex CLI 0.160.0 on the Windows machine already used to
-validate persistent defaults.
+The maintainer exercised the persistent-default and same-session flows on Codex
+CLI 0.160.0 for Windows. The supported acceptance sequence remains: install,
+review/trust the hook, use `omni quality`, inspect `omni status`, change the
+parent only through `/model`, verify the override survives a normal turn, reset,
+and verify a new chat returns to the saved policy. `omni save PROFILE` is
+accepted only after the preferences write is re-read and verified.
 
-1. Run the new offline tests and session_setup.py preview.
-2. Apply session_setup.py and review/trust the hook when Codex asks.
-3. Start Codex with codex.cmd --no-daemon on this machine.
-4. With saved Balanced active, send omni quality.
-5. Send omni status and confirm session policy Quality while saved policy stays
-   Balanced.
-6. Use /model to select the recommended Sol/High when needed.
-7. Send another normal prompt and confirm Quality remains effective.
-8. Send omni reset and confirm the session returns to saved Balanced.
-9. Start a new chat and confirm it starts Balanced, not the temporary Quality
-   override.
-10. Test omni save quality separately and confirm persistence only after the
-    defaults tool succeeds.
-
-Do not use model self-report alone to prove the served parent. Use the TUI footer
-and /status where available.
+Do not use model self-report alone to prove the served parent. Use runtime UI or
+metadata where available. Other Codex UI surfaces may cache configuration or
+differ in hook support and should be validated independently.
 
 ## Current boundaries
 
 - No in-flight parent-model mutation; /model remains the supported control.
-- No FreeLLMAPI, Jev, Laya, provider, or quota-fallback activation.
-- No automatic provider change.
-- No claim that every Codex UI supports the same hook behavior until tested.
-- No merge or release until Windows runtime acceptance passes.
+- Gemini Direct offload is a separate optional context path; the session hook
+  only reports local configuration status and never performs provider calls.
+- No automatic parent-provider change or quota fallback.
+- Jev and Laya remain separately opt-in.
+- No claim that every Codex UI supports identical hook behavior until tested.

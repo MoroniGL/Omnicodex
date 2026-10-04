@@ -1,9 +1,9 @@
 # Persistent OmniCodex defaults (experimental)
 
 Install once, choose once, start subsequent local Codex chats without manually
-mentioning OmniCodex. This increment implements **saved defaults and startup
-guidance**, not a replacement harness, a native dropdown, or pre-generation
-FreeLLMAPI routing.
+mentioning OmniCodex. This implements **saved defaults and startup guidance**,
+not a replacement harness or a native model dropdown. Optional Gemini Direct
+context offload remains a separate bounded path controlled by the routing skill.
 
 ## Behavior
 
@@ -29,11 +29,15 @@ Python 3.11+; no new dependency, login, API call or model download. Review first
 python .\scripts\setup.py
 ```
 
-This command is a preview. To install assets and persist startup guidance:
+This command is a preview. To install assets, persist startup guidance, and
+configure the same-session UserPromptSubmit hook:
 
 ```powershell
 python .\scripts\setup.py --apply
 ```
+
+Codex may require one explicit trust review for the local hook. Restart clients
+that cache `CODEX_HOME`, guidance, or hook configuration.
 
 An explicit initial choice can be made with `--profile balanced`. Updating changed
 assets still requires `--replace-existing` after reviewing conflicts. The old
@@ -97,9 +101,12 @@ with normal approval; a model saying it saved the profile is not evidence.
    `runtime_verified` and model availability remain unverified.
 
 No permissions, trust settings, network policy, provider keys, model catalogs,
-hooks or worker definitions are modified. Jev, Laya and FreeLLMAPI remain
-separately opt-in and are not enabled by Auto. The startup text adds a small
-amount of context; no savings or unconditional instruction compliance is claimed.
+or worker definitions are modified. The integrated setup adds only OmniCodex's
+UserPromptSubmit hook and preserves unrelated hooks. Jev and Laya remain
+separately opt-in. Gemini Direct remains optional and is used only after the
+scope/privacy gate accepts external offload; Auto never turns it into quota
+fallback. The startup text adds a small amount of context; no billing savings or
+unconditional instruction compliance is claimed.
 
 ## Recovery and limits
 
@@ -131,8 +138,8 @@ metadata where available; a self-report alone does not prove the served model.
 Test UI-specific config caching and explicit session overrides separately.
 
 Unit tests use synthetic assets, no paid models or real global settings. Native
-Codex runtime, graphical selection, mid-turn switching and FreeLLMAPI preparation
-are **not** validated by these tests.
+model selection remains Codex-owned; Gemini Direct has a separate explicit live
+validator and is not called by CI.
 
 ## Primary references checked 2026-10-02
 

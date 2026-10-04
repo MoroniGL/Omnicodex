@@ -2,15 +2,21 @@
 
 ## Unreleased
 
-- Add a live, optional FreeLLMAPI context worker through one ephemeral,
-  read-only `codex exec` invocation with per-call provider configuration.
-- Add bounded scope capture, privacy scanning, immutable staging, workspace
-  staleness checks, strict EvidencePack validation, and compact receipts.
-- Keep the premium parent authoritative and explicitly prohibit quota fallback,
-  global provider replacement, sensitive externalization, and trust in worker
-  model/prose self-reports.
-- Package the worker runtime and document offline diagnostics, controlled live
-  acceptance, telemetry limits, and benchmark requirements.
+## 0.1.0-alpha.2 — experimental preview
+
+- Add persistent OmniCodex defaults and startup guidance for new Codex sessions.
+- Add same-session `omni ...` profile controls through a bounded UserPromptSubmit
+  hook while keeping parent-model changes on Codex's native `/model` control.
+- Add direct Gemini context offload: deterministic approved scope capture,
+  structured EvidencePacks, exact source ranges, local validation, and native
+  fail-closed routing without WSL, FreeLLMAPI, or a nested Codex worker.
+- Add one preview-first `scripts/setup.py --apply` path that installs assets,
+  persistent defaults, and the session-control hook while preserving unrelated
+  user configuration and hooks.
+- Keep Gemini optional: missing `GEMINI_API_KEY` leaves native OmniCodex ready.
+  External context is never used as OpenAI quota fallback.
+- Add live Windows acceptance tooling and comprehensive provider/privacy tests.
+  Estimated handoff reduction is not a billing or free-tier guarantee.
 
 ## 0.1.0-alpha.1 — experimental preview
 
