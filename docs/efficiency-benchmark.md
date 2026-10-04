@@ -46,14 +46,14 @@ Offline policy tests are a prerequisite, not a replacement for live Codex/Claude
 integration tests or these performance measurements.
 
 
-## FreeLLMAPI token-offload condition
+## Gemini Direct token-offload condition
 
 Add a separate condition after deterministic narrowing:
 
-6. Read-only FreeLLMAPI context worker returns a validated EvidencePack; the
+6. Read-only Gemini Direct context worker returns a validated EvidencePack; the
    premium parent receives the pack and opens only exact evidence needed for
    decisions.
-7. Optional graph/index adapters plus the FreeLLMAPI worker, without stacking
+7. Optional graph/index adapters plus the Gemini Direct worker, without stacking
    multiple lossy compressors on the same evidence.
 
 For these conditions, record measured captured bytes and their token estimate,

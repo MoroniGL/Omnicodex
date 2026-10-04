@@ -1,6 +1,9 @@
 # Local installation and runtime validation
 
-Validated with Codex CLI **0.153.4** on macOS. This is a routing smoke test, not a quality or quota-savings benchmark. See Issue #1.
+Historical role-routing smoke tests used Codex CLI **0.153.4** on macOS.
+The v0.1.0-alpha.2 installation, session-control, and Gemini Direct acceptance
+work was exercised on Codex CLI **0.160.0** on Windows. These are runtime
+acceptance checks, not billing, free-tier, or quota-savings benchmarks.
 
 ## Installation layout
 
@@ -13,7 +16,18 @@ Validated with Codex CLI **0.153.4** on macOS. This is a routing smoke test, not
 | `integrations/efficiency.json` | `$CODEX_HOME/omnicodex/integrations/efficiency.json` |
 | `schemas/evidence-pack.schema.json` | `$CODEX_HOME/omnicodex/schemas/evidence-pack.schema.json` |
 
-Run `python3 scripts/install.py`. Before writing, the installer backs up the existing `config.toml` and any destination files to a private, timestamped directory. It refuses conflicting destinations instead of overwriting them unless a reviewed update explicitly uses `--replace-existing`. It records hashes and whether each destination already existed. The seven agent definitions use the supported standalone schema (`name`, `description`, `developer_instructions`, `model`, `model_reasoning_effort`). The routing skill needs YAML `name` and `description` frontmatter to be discoverable.
+Use `python3 scripts/setup.py` for a no-write preview, then
+`python3 scripts/setup.py --apply` for the recommended complete installation.
+It installs the assets, persistent defaults, and the session-control hook.
+Codex may require a one-time trust review for the local hook. The asset installer
+backs up the existing `config.toml` and destination files to a private,
+timestamped directory, refuses conflicting destinations unless a reviewed update
+uses `--replace-existing`, and records hashes. `python3 scripts/install.py`
+remains the asset-only path and intentionally does not activate defaults/hooks.
+The seven agent definitions use the supported standalone schema (`name`,
+`description`, `developer_instructions`, `model`,
+`model_reasoning_effort`). The routing skill needs YAML `name` and
+`description` frontmatter to be discoverable.
 
 Keep the existing `config.toml` unchanged. The namespaced profile avoids replacing an existing `balanced` profile. Select it for a new CLI session:
 
@@ -75,13 +89,14 @@ Official references: [Custom agents](https://learn.chatgpt.com/docs/agent-config
 
 ## Gemini Direct worker validation
 
-Windows offline refactor validation on 2026-10-03 passed 244 unit tests, including
-65 direct-provider/worker/mocked-live tests, 23 installer/setup tests, 114
-routing/profile tests, and 42 retained scope/legacy-adapter tests. `compileall`,
-manifest/example-pack validation, and `git diff --check` passed. Independent
-review accepted the implementation after fixing privacy, parser, telemetry,
-deadline-reader, and HTTP connection-lifecycle regressions. No real Gemini call
-was made: this executor had no configured key. The project-specified
+The v0.1.0-alpha.2 release-candidate GitHub Actions run passed **275 tests**,
+`compileall`, and whitespace checks. The earlier Windows refactor checkpoint on
+2026-10-03 passed 244 unit tests (65 direct-provider/worker/mocked-live, 23
+installer/setup, 114 routing/profile, and 42 retained scope/legacy-adapter tests).
+Independent review accepted the implementation after fixing privacy, parser,
+telemetry, deadline-reader, and HTTP connection-lifecycle regressions. The later
+user-run live validator completed successfully with a configured Gemini key; CI
+itself makes no Gemini call. The project-specified
 `npx @Codex-flow/cli@latest security scan` could not run because npm rejects that
 package name and returned 404; the security regression suite and independent
 review provide the available local evidence.

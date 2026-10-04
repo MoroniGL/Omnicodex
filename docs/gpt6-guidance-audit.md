@@ -43,7 +43,7 @@ Sources:
 ## Deferred
 
 Agents API cloud execution, mid-turn steering, and async tool calling may help a
-future hosted mode. They are not required for the first local FreeLLMAPI context
+future hosted mode. They are not required for the local Gemini Direct context
 worker. Jev, quota fallback, and OmniClaude are not OmniCodex completion
 dependencies.
 
