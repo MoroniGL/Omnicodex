@@ -90,3 +90,19 @@ only task-local evidence. Any future memory must be project/worktree-scoped,
 source-linked, invalidated on relevant changes, and explicitly subject to retention
 and deletion policy. Never persist credentials, full environment dumps, private
 conversation content, or raw command logs to the public repository.
+
+## Gemini Direct EvidencePacks
+
+For a large, explicitly approved scope, capture only approved repo-relative
+files deterministically and send that immutable capture to Gemini Direct. The
+provider returns a compact EvidencePack; the premium parent must inspect cited
+source and retain final acceptance. Use `GEMINI_API_KEY` from the environment
+only. `OMNICODEX_GEMINI_MODEL` defaults to `gemini-3.5-flash-lite`.
+
+The offline status JSON distinguishes `native_status: "READY"` from
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, and includes the safe
+provider/model configuration. READY means a local key and safe model configuration exist; it does not prove
+connectivity, service access, billing, or free-tier eligibility. The optional
+future FreeLLMAPI adapter is not an installation dependency. Never treat token
+estimates as actual provider usage; record actual input/cached-input/output
+usage only when Gemini returns it.

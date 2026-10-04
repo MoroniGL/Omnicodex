@@ -1,6 +1,6 @@
 # Context & Token Efficiency Architecture
 
-Status: experimental, first integration increment. Reviewed 2026-09-21.
+Status: experimental, live worker implemented. Reviewed 2026-10-03.
 
 ## Scope
 
@@ -24,6 +24,44 @@ provider never changes the orchestrator or authorizes a more expensive model.
 The existing model/profile TOML templates still need installation-specific runtime
 validation. Auto in this increment is not an automatic model-switching engine.
 
+## Gemini Direct token-offload path
+
+Gemini Direct is an optional external EvidencePack generator. It never replaces
+the OmniCodex parent and never responds to OpenAI quota exhaustion.
+
+```text
+premium parent
+  -> deterministic search/stat/path narrowing
+  -> immutable bounded scope capture
+  -> measured ContextCostGate
+     -> small/ineligible: native parent path
+     -> large + approved + nonsensitive
+        -> immutable approved capture
+        -> one direct Gemini HTTPS request
+        -> local EvidencePack validation + workspace re-snapshot
+        -> compact pack to parent
+        -> parent opens exact cited ranges and accepts or rejects
+```
+
+Only the deterministic capture is supplied to Gemini, together with the task,
+snapshot, and EvidencePack schema. The provider has no workspace, shell, tool,
+or Git access. The primary route starts no nested Codex process and requires no
+WSL, Ubuntu, Docker, or OS sandbox. `GEMINI_API_KEY` is read from the environment
+only; `OMNICODEX_GEMINI_MODEL` selects the model and defaults to
+`gemini-3.5-flash-lite`.
+
+Captured text is displayed with one-based line labels reset per file, including
+blank lines. Original bytes, hashes, and size metrics remain unchanged. Labels
+help locate citations but do not establish that a claim follows from the cited
+text: only the premium parent's source verification can establish that.
+
+The local validator rejects unknown fields, wrong task/snapshot, out-of-scope
+files, invalid or missing line evidence, oversized packs, and a changed source
+snapshot. The final acceptance check counts the UTF-8 bytes in the pack plus the
+union of cited source ranges; that compact handoff must be at most 80% of the
+captured raw estimate, preserving a minimum 20% estimated reduction. A failed or
+stale pack is never promoted to evidence.
+
 ## Provider contracts
 
 | Provider | First increment | Required gate | Native fallback |
@@ -33,10 +71,11 @@ validation. Auto in this increment is not an automatic model-switching engine.
 | RTK | Documented follow-on only | Future command-specific compatibility and exit-code tests | No automatic rewrite |
 | Caveman-inspired brevity | Original structured handoff policy | Keep evidence, identifiers and failures intact | Longer report when necessary |
 | Desktop Commander | Optional future tool provider | Actual host permissions, not just prompt instructions | Native tools |
+| Gemini Direct | Direct generation of a compact pack from an immutable approved capture | ContextCostGate, explicit externalization approval, privacy scan, immutable scope, valid EvidencePack | Native parent path with transparent reason/status |
 
-Provider code is not vendored. Upstream licenses and installation/release checks
-remain the user's responsibility when installing those separate projects. The
-OmniCodex policy is original; no upstream performance claim is adopted as our own.
+The Gemini Direct provider is a small standard-library implementation bundled
+with OmniCodex. Context Mode and codebase-memory-mcp remain optional upstream
+tools; their installation, compatibility, and performance claims are separate.
 
 ## Runtime integration
 
@@ -82,6 +121,19 @@ It does not open authentication/configuration files or scan the project. Missing
 optional providers are normal. A zero exit status means the diagnostic itself
 completed, not that Codex/MCP/model overrides work. Invalid inputs exit with 2.
 
+The installed live-worker diagnostic is also offline:
+
+```sh
+python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
+```
+
+Its JSON reports `native_status: "READY"` and `free_context_offload: "READY"` or
+`"NOT CONFIGURED"`, with the safe configured provider/model. It does not contact
+Gemini, expose the key, or verify connectivity. `dry-run` validates a bounded
+request and captures its approved scope without network access. `run` sends one
+direct request and never loops across identical failures or promotes Gemini to
+orchestrator.
+
 With no inventory and explicit provider opt-in, plans select native tools. To
 exercise the decision logic with **synthetic data only**:
 
@@ -96,6 +148,48 @@ python3 scripts/efficiency.py plan \
 The output always says `advisory_dry_run`. It executes nothing, changes no model,
 and does not independently verify supplied evidence. Omit `--enable` to disable
 optional selection even when tools are reported available.
+
+## Privacy and credential boundary
+
+Gemini Direct is a paid API integration and may incur billing. A free model name
+does not establish free-tier account eligibility. Public workspaces and explicitly
+approved private workspaces are eligible. Private workspaces without
+approval stay native. Sensitive paths or content fail closed, including `.env`,
+credentials/tokens/passwords, private keys, auth files, secret-bearing dumps,
+binary files, and unrelated conversation or environment history.
+
+`GEMINI_API_KEY` remains in the process environment. It is never written to the
+request, argv, prompt, receipt, or installed configuration. Provider output is
+checked for the credential before any result is accepted.
+
+Path and content screening is a bounded fail-closed safeguard, not a substitute
+for correct workspace classification. Operators must not approve a scope whose
+sensitivity is uncertain. Detected sensitive names, bytes, links/reparse points,
+binary content, or credentials reject the entire candidate scope.
+
+Scope hashes cover only entries accepted after directory-membership checks; the
+worker does not read unrelated workspace files to create or verify a capture.
+Instruction-blacklist screening is heuristic, not a comprehensive injection
+detector. Provider prose remains an untrusted locator until the premium parent
+opens and verifies each cited source range.
+
+## Receipts and failure behavior
+
+Accepted runs write `evidence-pack.json` and `receipt.json` to a fresh private
+directory outside the workspace. Receipts separate captured raw bytes,
+`estimated_raw_tokens`, `estimated_evidence_pack_tokens`, cited verification
+evidence, the combined compact handoff, and estimated premium context avoided
+from actual worker input/cached-input/output/reasoning tokens. Routing uses the
+captured file count, byte count, and line count; request metrics cannot inflate a
+small scope into an offload. Served provider/model
+and retry/fallback counts remain `null` unless reliable runtime evidence exposes
+them. Root usage is recorded separately when available; billing and subscription
+allowance are always unverified unless measured elsewhere.
+
+Missing key produces a transparent native fallback. Unavailable Gemini service,
+timeout, nonzero exit, malformed output, credential leakage, invalid evidence,
+or workspace mutation produces a failed receipt and recommends native handling.
+There is no destructive retry and no quota-triggered route.
 
 ### Real capability inventory
 
@@ -147,3 +241,13 @@ These are upstream documentation observations, not live compatibility results.
 5. [RTK](https://github.com/rtk-ai/rtk) and
    [Caveman](https://github.com/JuliusBrussee/caveman): future integration research
    and brevity inspiration respectively; no benchmark results reused.
+6. [OpenAI Codex permission profiles](https://learn.chatgpt.com/docs/permissions):
+   current profile syntax, filesystem precedence, platform enforcement, and the
+   non-composition rule for the older `--sandbox` settings; checked 2026-10-03.
+7. [Gemini generateContent API](https://ai.google.dev/api/generate-content) and
+   [structured JSON output](https://ai.google.dev/gemini-api/docs/structured-output):
+   the direct provider uses header authentication, a compatible schema projection,
+   and response usage/model metadata; checked 2026-10-03. The canonical local
+   EvidencePack validator enforces constraints omitted from the API schema subset.
+   Array bounds are enforced locally; documented text-part thought/signature
+   metadata is discarded before accepting the final JSON pack.

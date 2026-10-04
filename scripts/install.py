@@ -9,20 +9,73 @@ import hashlib
 import json
 import os
 import shutil
+import stat
+import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from scripts.providers.gemini import GeminiProvider
+except ImportError:  # Direct execution still reports a safe unavailable status.
+    GeminiProvider = None  # type: ignore[misc,assignment]
+
 
 PROFILE_IDS = ("economy", "balanced", "quality", "max")
 # Explicit assets prevent installing arbitrary local files or logs with the skill.
-SKILL_FILES = ("SKILL.md", "references/efficiency.md")
+SKILL_FILES = ("SKILL.md", "references/routing.md", "references/efficiency.md", "references/token-offload.md")
+RUNTIME_FILES = (
+    "scripts/__init__.py",
+    "scripts/efficiency.py",
+    "scripts/offload_scope.py",
+    "scripts/codex_exec_adapter.py",
+    "scripts/offload_telemetry.py",
+    "scripts/free_context_worker.py",
+    "scripts/validate_gemini.py",
+    "scripts/providers/__init__.py",
+    "scripts/providers/base.py",
+    "scripts/providers/gemini.py",
+    "integrations/efficiency.json",
+    "schemas/evidence-pack.schema.json",
+)
 
 
 class InstallConflict(RuntimeError):
     """Raised when an existing destination differs from the repository asset."""
+
+
+def offload_status() -> dict[str, Any]:
+    """Read Gemini Direct configuration without probing or retaining credentials."""
+
+    unavailable = {
+        "native_status": "READY",
+        "free_context_offload": "NOT CONFIGURED",
+        "provider": "gemini_direct",
+        "model": None,
+        "connectivity_verified": False,
+        "network_requests": 0,
+    }
+    if GeminiProvider is None:
+        return unavailable
+    try:
+        settings = GeminiProvider(environment=os.environ).status()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return unavailable
+    if (not isinstance(settings, dict) or settings.get("provider") != "gemini_direct"
+            or not isinstance(settings.get("configured"), bool)
+            or settings.get("model") is not None and not isinstance(settings.get("model"), str)):
+        return unavailable
+    return {
+        **unavailable,
+        "free_context_offload": "READY" if settings["configured"] else "NOT CONFIGURED",
+        "model": settings["model"],
+    }
 
 
 @dataclass(frozen=True)
@@ -59,11 +112,15 @@ def _installation_items(repo_root: Path, codex_home: Path, skills_home: Path) ->
         )
         for relative in SKILL_FILES
     )
+    items.extend(
+        InstallItem(repo_root / relative, codex_home / "omnicodex" / relative)
+        for relative in RUNTIME_FILES
+    )
     return items
 
 
 def _validate_sources(items: list[InstallItem]) -> None:
-    expected = len(PROFILE_IDS) + 7 + len(SKILL_FILES)
+    expected = len(PROFILE_IDS) + 7 + len(SKILL_FILES) + len(RUNTIME_FILES)
     if len(items) != expected:
         raise ValueError(f"expected {expected} OmniCodex assets, found {len(items)}")
     for item in items:
@@ -71,6 +128,8 @@ def _validate_sources(items: list[InstallItem]) -> None:
             raise FileNotFoundError(item.source)
         if item.source.suffix == ".toml":
             _load_toml(item.source)
+        elif item.source.suffix == ".json":
+            json.loads(item.source.read_text(encoding="utf-8"))
     skill_source = next(item.source for item in items if item.source.name == "SKILL.md")
     skill = skill_source.read_text(encoding="utf-8")
     if not skill.startswith("---\n") or "\n---\n" not in skill[4:]:
@@ -78,10 +137,18 @@ def _validate_sources(items: list[InstallItem]) -> None:
 
 
 def _refuse_symlink_destination(path: Path) -> None:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     current = path
     while True:
-        if current.is_symlink():
-            raise InstallConflict(f"refusing symlink destination: {path}")
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(info.st_mode) or bool(
+                getattr(info, "st_file_attributes", 0) & reparse_flag
+            ):
+                raise InstallConflict(f"refusing link or reparse destination: {path}")
         if current == current.parent:
             return
         current = current.parent
@@ -179,18 +246,22 @@ def install(
     manifest_path.chmod(0o600)
     (backup / "manifest.json").write_text(manifest_text, encoding="utf-8")
     (backup / "manifest.json").chmod(0o600)
+    manifest["offload_status"] = offload_status()
     return manifest
 
 
 def _project_config_paths(cwd: Path, codex_home: Path) -> list[Path]:
     cwd = cwd.resolve()
     ancestors = list(reversed((cwd, *cwd.parents)))
-    user_config = (codex_home / "config.toml").resolve()
+    user_configs = {
+        (codex_home / "config.toml").resolve(),
+        (Path.home() / ".codex" / "config.toml").resolve(),
+    }
     return [
         path
         for base in ancestors
         if (path := base / ".codex" / "config.toml").is_file()
-        and path.resolve() != user_config
+        and path.resolve() not in user_configs
     ]
 
 
@@ -264,7 +335,8 @@ def main() -> int:
         )
     except InstallConflict as error:
         parser.error(str(error))
-    print(json.dumps({"result": manifest["result"], "backup": manifest["backup"], "files": len(manifest["files"])}, indent=2))
+    print(json.dumps({"result": manifest["result"], "backup": manifest["backup"],
+                      "files": len(manifest["files"]), "offload_status": manifest["offload_status"]}, indent=2))
     return 0
 
 

@@ -4,11 +4,10 @@
 
 > Use the right intelligence, at the right time.
 
-**v0.1.0-alpha.1 — experimental public preview.** This version combines the
-installer/profile work from [PR #2](https://github.com/MoroniGL/Omnicodex/pull/2)
-and the optional context-efficiency work from
-[PR #3](https://github.com/MoroniGL/Omnicodex/pull/3).
-It is not a stable release or a demonstrated subscription-savings guarantee.
+**v0.1.0-alpha.2 — experimental public preview.** This version adds persistent
+OmniCodex defaults, same-session profile controls, and optional Gemini Direct
+context offload with source-linked EvidencePacks. It remains an alpha release,
+not a subscription-savings or billing guarantee.
 
 OmniCodex separates orchestration from bounded execution and routes work by
 complexity, risk, and cost without lowering the task's acceptance criteria.
@@ -29,29 +28,41 @@ Model availability and configuration support depend on the installed Codex and a
 
 ## Install or update
 
-Use a compatible Codex CLI (the maintainer's smoke tests used **0.153.4**) and
-**Python 3.11+**. Check `python3 --version`; some Macs have an older default Python.
-Use an already installed compatible interpreter where necessary.
+Use a compatible Codex CLI (the maintainer's Windows acceptance used **0.160.0**)
+and **Python 3.11+**.
 
-From a checkout of this version:
+### Recommended Codex-assisted install
 
-```sh
-python3 -m unittest discover -s tests -v
-python3 scripts/install.py
-```
-
-The installer installs four namespaced profiles, seven custom agents, and both
-routing-skill files, including `references/efficiency.md`. It checks conflicts
-before writing, creates a private backup, records asset hashes, and preserves the
-base `config.toml`. After reviewing an update, explicitly allow replacement with:
+In Codex Desktop or CLI, give Codex the repository URL and ask it to install
+OmniCodex. The intended flow is preview-first:
 
 ```sh
-python3 scripts/install.py --replace-existing
+python3 scripts/setup.py
+python3 scripts/setup.py --apply
 ```
 
-This installs OmniCodex assets only. It does not install or register optional MCP
-servers, change hooks, or switch the model of an already-running conversation.
+The first command writes nothing. The second installs the four namespaced
+profiles, seven custom agents, the routing skill, Gemini Direct offload runtime,
+persistent Auto defaults, and the UserPromptSubmit session-control hook. Existing
+unrelated config and hooks are preserved; changed OmniCodex-owned files require
+`--replace-existing` after review. Codex may ask once to trust the local hook.
+Restart a cached Desktop/IDE session after installation so it reloads
+`CODEX_HOME`, guidance, and hooks.
+
+For a fixed saved profile at install time:
+
+```sh
+python3 scripts/setup.py --profile balanced --apply
+```
+
+`scripts/install.py` remains available as the conservative **asset-only** entry
+point; it intentionally does not activate persistent defaults or the session hook.
 Review [installation and rollback](docs/local-validation.md) before replacing files.
+
+Native OmniCodex installs and works without a Gemini key. There is no WSL,
+Ubuntu, Docker, FreeLLMAPI Desktop, or second Codex installation requirement.
+Gemini Direct offload is optional; missing configuration reports `NOT CONFIGURED`
+and leaves native routing available.
 
 Start a **new CLI session**:
 
@@ -62,8 +73,21 @@ codex --strict-config -p omnicodex-quality
 codex --strict-config -p omnicodex-max
 ```
 
-Profiles do not change an existing Desktop/IDE task. To inspect candidate static
-model layers from the intended working directory:
+Profiles do not silently change a running parent model. Inside an installed
+Codex conversation, these ordinary messages control OmniCodex policy at prompt
+boundaries:
+
+```text
+omni status
+omni balanced
+omni quality
+omni reset
+omni save quality
+```
+
+Use Codex's native `/model` selector when you want the parent model itself to
+change in the same thread. To inspect candidate static model layers from the
+intended working directory:
 
 ```sh
 python3 scripts/install.py --inspect-profile omnicodex-balanced --cwd "$PWD"
@@ -92,24 +116,62 @@ supplied evidence. Neither proves live MCP access or changes a model.
 Read the [efficiency architecture](docs/context-token-efficiency.md) and
 [benchmark protocol](docs/efficiency-benchmark.md).
 
+### Optional Gemini Direct context worker
+
+For an explicitly approved public or private workspace, OmniCodex can send an
+immutable bounded capture to Gemini Direct over HTTPS and receive a source-linked
+EvidencePack. The premium parent still owns planning, implementation,
+consequential decisions, evidence inspection, and acceptance.
+
+This is not quota fallback. Small tasks stay native, sensitive content is
+rejected, and the parent is never switched. Setup is environment only:
+
+```sh
+export GEMINI_API_KEY='set-locally-never-commit'
+# Optional; defaults to gemini-3.5-flash-lite
+export OMNICODEX_GEMINI_MODEL='gemini-3.5-flash-lite'
+python3 "$CODEX_HOME/omnicodex/scripts/free_context_worker.py" doctor
+```
+
+`doctor` is offline: its JSON reports `native_status: "READY"` and
+`free_context_offload: "READY"` or `"NOT CONFIGURED"`, plus provider/model
+configuration. It does not probe connectivity or verify a served model. A
+configured key is local configuration only. See the
+[architecture and privacy contract](docs/context-token-efficiency.md) and the
+[controlled acceptance procedure](docs/local-validation.md).
+
+`omni status` includes the same offline Gemini Direct configuration distinction.
+It does not claim the optional worker is connected or live.
+
+`python scripts/validate_gemini.py` is the explicit live acceptance command. It
+makes two requests only when local status is READY: a small connectivity probe
+that leaves ordinary small work native, and a roughly 45k-token synthetic gate
+case. No live Gemini result is claimed in this repository; READY is local
+configuration only.
+
 ## Validation and limitations
 
-- The maintainer reported 26 passing efficiency tests on macOS with Python 3.12.14.
+- GitHub Actions validates the full Python suite, compiles the scripts, and runs
+  whitespace checks without making Gemini calls.
+- Windows acceptance on Codex CLI 0.160.0 exercised persistent defaults,
+  same-session profile control, installation, and Gemini Direct validation.
+- A live Gemini Direct synthetic 180 KB case using `gemini-3.5-flash-lite`
+  passed EvidencePack validation and reported roughly **99.6% estimated compact
+  handoff reduction**. That is an estimated context reduction, not verified
+  billing, free-tier eligibility, or subscription savings.
 - A persisted Balanced session recorded Sol/Medium in the parent and Luna/Low
   and Terra/Medium in real sequential children. These are **local Codex records**,
   not an independent attestation of the provider-served model.
-- PR #2 contains an earlier, broader maintainer-reported smoke test of all static
-  profiles and seven roles, including Max. It also discloses a planner sentinel
-  output mismatch. Do not treat routing metadata as proof of task quality.
-- The combined source is checked by automated Python tests, including installation
-  of the efficiency reference. CI does not make paid model calls.
 - Context Mode and codebase-memory-mcp were not configured in the latest Mac test.
   Live integration, quality comparisons, token/allowance savings, and cross-client
   compatibility remain unverified. No new Max/Astra probe is part of this release preparation.
+- The Gemini Direct worker has comprehensive offline coverage. A real provider
+  test must only be claimed when a configured key and connectivity validation ran;
+  estimated context reduction is not verified billing or subscription savings.
 - RTK automatic rewriting, persistent project memory, and automatic MCP setup are
   not implemented. Claude Code cannot use these Codex model/profile files as-is.
 
-See the [release notes](docs/releases/v0.1.0-alpha.1.md), [routing policy](docs/routing.md),
+See the [release notes](docs/releases/v0.1.0-alpha.2.md), [routing policy](docs/routing.md),
 [profiles](docs/profiles.md), [architecture](docs/architecture.md), and [roadmap](docs/roadmap.md).
 
 ## Principles

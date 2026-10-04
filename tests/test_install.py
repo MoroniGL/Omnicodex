@@ -3,18 +3,55 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.install import InstallConflict, inspect_profile, install
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_FILES = {
+    "scripts/__init__.py",
+    "scripts/efficiency.py",
+    "scripts/offload_scope.py",
+    "scripts/codex_exec_adapter.py",
+    "scripts/offload_telemetry.py",
+    "scripts/free_context_worker.py",
+    "scripts/validate_gemini.py",
+    "scripts/providers/__init__.py",
+    "scripts/providers/base.py",
+    "scripts/providers/gemini.py",
+    "integrations/efficiency.json",
+    "schemas/evidence-pack.schema.json",
+}
 
 
 class InstallerTests(unittest.TestCase):
+    def test_installed_session_status_loads_provider_outside_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home, skills = base / "home", base / "skills"
+            install(ROOT, home, skills)
+            session = home / "omnicodex" / "session_switch.py"
+            shutil.copyfile(ROOT / "scripts" / "session_switch.py", session)
+            env = dict(os.environ, GEMINI_API_KEY="status-fixture-key")
+            env.pop("PYTHONPATH", None)
+            result = subprocess.run([sys.executable, str(session), "doctor", "--codex-home", str(home)],
+                                    cwd=base, env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            status = json.loads(result.stdout)
+            self.assertEqual(status["free_context_offload"]["status"], "READY")
+            self.assertFalse(status["free_context_offload"]["connectivity_verified"])
+            self.assertNotIn("status-fixture-key", result.stdout + result.stderr)
+
     def test_installs_all_profiles_agents_and_skill_without_changing_base_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -38,17 +75,79 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(len(list((codex_home / "agents").glob("*.toml"))), 7)
             self.assertTrue((skills_home / "omnicodex" / "SKILL.md").is_file())
-            reference = skills_home / "omnicodex" / "references" / "efficiency.md"
-            self.assertEqual(reference.read_bytes(),
-                             (ROOT / "skills/omnicodex/references/efficiency.md").read_bytes())
-            self.assertEqual(len(manifest["files"]), 13)
-            self.assertTrue(any(item["destination"] == str(reference.resolve())
+            references = {
+                name: skills_home / "omnicodex" / "references" / name
+                for name in ("routing.md", "efficiency.md", "token-offload.md")
+            }
+            for name, reference in references.items():
+                self.assertEqual(
+                    reference.read_bytes(),
+                    (ROOT / "skills/omnicodex/references" / name).read_bytes(),
+                )
+            for relative in RUNTIME_FILES:
+                self.assertEqual(
+                    (codex_home / "omnicodex" / relative).read_bytes(),
+                    (ROOT / relative).read_bytes(),
+                )
+            self.assertEqual(len(manifest["files"]), 27)
+            self.assertEqual(manifest["offload_status"]["native_status"], "READY")
+            self.assertEqual(manifest["offload_status"]["connectivity_verified"], False)
+            self.assertTrue(any(item["destination"] == str(references["token-offload.md"].resolve())
                                 for item in manifest["files"]))
             self.assertEqual(
                 json.loads((codex_home / "omnicodex" / "install-manifest.json").read_text())["result"],
                 "installed",
             )
             self.assertEqual((Path(manifest["backup"]) / "config.toml").read_text(), original_config)
+
+    def test_installed_worker_doctor_runs_outside_repo_without_a_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            codex_home.mkdir()
+            install(ROOT, codex_home, skills_home)
+            environment = dict(os.environ)
+            environment.pop("GEMINI_API_KEY", None)
+            environment.pop("OMNICODEX_GEMINI_MODEL", None)
+            environment.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [sys.executable, str(codex_home / "omnicodex/scripts/free_context_worker.py"), "doctor"],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["native_status"], "READY")
+            self.assertEqual(report["free_context_offload"], "NOT CONFIGURED")
+            self.assertFalse(report["connectivity_verified"])
+
+    def test_installer_cli_reports_offline_status_outside_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            codex_home.mkdir()
+            environment = dict(os.environ)
+            environment.pop("GEMINI_API_KEY", None)
+            environment.pop("OMNICODEX_GEMINI_MODEL", None)
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/install.py"), "--repo-root", str(ROOT),
+                 "--codex-home", str(codex_home), "--skills-home", str(skills_home)],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["offload_status"]["native_status"], "READY")
+            self.assertEqual(report["offload_status"]["free_context_offload"], "NOT CONFIGURED")
+            self.assertFalse(report["offload_status"]["connectivity_verified"])
 
     def test_refuses_to_replace_a_conflicting_destination_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -87,17 +186,20 @@ class InstallerTests(unittest.TestCase):
             root = Path(directory)
             codex_home = root / "codex-home"
             skills_home = root / "skills"
-            outside = root / "outside"
             codex_home.mkdir()
-            outside.mkdir()
-            external_manifest = outside / "install-manifest.json"
-            external_manifest.write_text("external sentinel\n")
-            (codex_home / "omnicodex").symlink_to(outside, target_is_directory=True)
+            linked_directory = codex_home / "omnicodex"
+            real_lstat = Path.lstat
+            symlink = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0)
 
-            with self.assertRaises(InstallConflict):
-                install(ROOT, codex_home, skills_home)
+            with patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=lambda path: symlink if path == linked_directory else real_lstat(path),
+            ):
+                with self.assertRaises(InstallConflict):
+                    install(ROOT, codex_home, skills_home)
 
-            self.assertEqual(external_manifest.read_text(), "external sentinel\n")
             self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
 
     def test_replace_existing_does_not_follow_symlinked_manifest_file(self) -> None:
@@ -106,18 +208,68 @@ class InstallerTests(unittest.TestCase):
             codex_home = root / "codex-home"
             skills_home = root / "skills"
             manifest_directory = codex_home / "omnicodex"
-            outside = root / "outside"
             manifest_directory.mkdir(parents=True)
-            outside.mkdir()
-            external_manifest = outside / "manifest.json"
-            external_manifest.write_text("external sentinel\n")
-            (manifest_directory / "install-manifest.json").symlink_to(external_manifest)
+            manifest = manifest_directory / "install-manifest.json"
+            real_lstat = Path.lstat
+            symlink = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0)
 
-            with self.assertRaises(InstallConflict):
-                install(ROOT, codex_home, skills_home, replace_existing=True)
+            with patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=lambda path: symlink if path == manifest else real_lstat(path),
+            ):
+                with self.assertRaises(InstallConflict):
+                    install(ROOT, codex_home, skills_home, replace_existing=True)
 
-            self.assertEqual(external_manifest.read_text(), "external sentinel\n")
             self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
+
+    def test_refuses_windows_reparse_manifest_directory_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            skills_home = root / "skills"
+            codex_home.mkdir()
+            reparse_directory = codex_home / "omnicodex"
+            real_lstat = Path.lstat
+            reparse = SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_file_attributes=getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400),
+            )
+
+            with patch.object(
+                Path,
+                "lstat",
+                autospec=True,
+                side_effect=lambda path: reparse if path == reparse_directory else real_lstat(path),
+            ):
+                with self.assertRaises(InstallConflict):
+                    install(ROOT, codex_home, skills_home)
+
+            self.assertFalse((codex_home / "omnicodex-economy.config.toml").exists())
+
+    def test_runtime_replacement_is_backed_up_and_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "codex/omnicodex/scripts/efficiency.py"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("previous runtime\n", encoding="utf-8")
+
+            manifest = install(
+                ROOT,
+                root / "codex",
+                root / "skills",
+                replace_existing=True,
+            )
+
+            entry = next(
+                item
+                for item in manifest["files"]
+                if item["destination"] == str(destination.resolve())
+            )
+            self.assertEqual(entry["action"], "replaced")
+            self.assertEqual(Path(entry["backup"]).read_text(), "previous runtime\n")
+            self.assertEqual(destination.read_bytes(), (ROOT / "scripts/efficiency.py").read_bytes())
 
     def test_reference_conflict_is_rejected_before_installing_other_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -148,7 +300,7 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source"
-            for name in ("profiles", "agents", "skills"):
+            for name in ("profiles", "agents", "skills", "scripts", "integrations", "schemas"):
                 shutil.copytree(ROOT / name, source / name)
             (source / "skills/omnicodex/references/efficiency.md").unlink()
             with self.assertRaises(FileNotFoundError):
@@ -160,11 +312,18 @@ class InstallerTests(unittest.TestCase):
 class ProfileInspectionTests(unittest.TestCase):
     def test_user_config_is_not_reloaded_as_a_project_layer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            codex_home = home / ".codex"
+            root = Path(directory)
+            home = root / "user-home"
+            codex_home = root / "selected-codex-home"
             project = home / "project"
+            actual_user_config = (Path.home() / ".codex" / "config.toml").resolve()
+            real_is_file = Path.is_file
+            (home / ".codex").mkdir(parents=True)
             codex_home.mkdir()
             project.mkdir()
+            (home / ".codex" / "config.toml").write_text(
+                'model = "ambient-user"\nmodel_reasoning_effort = "ultra"\n'
+            )
             (codex_home / "config.toml").write_text(
                 'model = "global"\nmodel_reasoning_effort = "ultra"\n'
             )
@@ -172,7 +331,15 @@ class ProfileInspectionTests(unittest.TestCase):
                 'model = "gpt-5.6-sol"\nmodel_reasoning_effort = "medium"\n'
             )
 
-            result = inspect_profile(codex_home, "omnicodex-balanced", project)
+            with patch.object(Path, "home", return_value=home), patch.object(
+                Path,
+                "is_file",
+                autospec=True,
+                side_effect=lambda path: (
+                    False if path.resolve() == actual_user_config else real_is_file(path)
+                ),
+            ):
+                result = inspect_profile(codex_home, "omnicodex-balanced", project)
 
             self.assertEqual(result["resolved_model"], "gpt-5.6-sol")
             self.assertEqual(result["resolved_reasoning_effort"], "medium")
