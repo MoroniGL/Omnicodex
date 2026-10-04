@@ -18,7 +18,7 @@ Use the smallest useful path:
 3. Before reading a large repository slice, diff, log, or document set into the
    parent context, consult [token offload](references/token-offload.md). Narrow
    scope with deterministic tools first, then automatically estimate and run the
-   local gate. Invoke the optional read-only FreeLLMAPI worker only when the gate,
+   local gate. Invoke the optional read-only Gemini Direct provider only when the gate,
    workspace approval, and local prerequisites allow it; never use it as quota fallback.
 4. For optional graph/index or large-output adapters, consult
    [efficiency adapters](references/efficiency.md) only when relevant.

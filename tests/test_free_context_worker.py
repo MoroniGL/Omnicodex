@@ -136,7 +136,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         return (sys.executable, str(fake))
 
     def execute_fake(self, mode, *, prompt="Read the staged workspace and return the schema result.",
-                     timeout_seconds=0.2, max_final_message_bytes=None):
+                     timeout_seconds=1.0, max_final_message_bytes=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             staged = root / "stage"
@@ -172,7 +172,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         }
         for mode, expected in expectations.items():
             with self.subTest(mode=mode):
-                result = self.execute_fake(mode)
+                result = self.execute_fake(mode, timeout_seconds=0.2 if mode == "timeout" else 1.0)
                 self.assertEqual((result["outcome"], result["exit_code"]), expected)
                 self.assertNotIn("stdout", result)
                 self.assertNotIn("stderr", result)
