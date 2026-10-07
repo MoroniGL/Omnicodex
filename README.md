@@ -146,8 +146,9 @@ It does not claim the optional worker is connected or live.
 `python scripts/validate_gemini.py` is the explicit live acceptance command. It
 makes two requests only when local status is READY: a small connectivity probe
 that leaves ordinary small work native, and a roughly 45k-token synthetic gate
-case. No live Gemini result is claimed in this repository; READY is local
-configuration only.
+case. `READY` remains local configuration only. The alpha.2 maintainer validation
+did run successfully on Windows, but each installation still needs to validate
+its own key, account, and model access; no billing or free-tier claim is implied.
 
 ## Validation and limitations
 
